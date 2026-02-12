@@ -884,10 +884,8 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
             currentType = currentType.BaseType;
         }
         
-        // Reverse to get base-to-derived order
-        typeHierarchy.Reverse();
-        
-        // Collect properties in base-to-derived order
+        // Process in derived-to-base order (no reversal)
+        // This means properties from the most derived class come first
         var properties = new List<IPropertySymbol>();
         var seenPropertyNames = new HashSet<string>();
         
