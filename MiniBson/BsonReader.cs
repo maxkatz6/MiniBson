@@ -2,10 +2,17 @@ using System.Text;
 
 namespace MiniBson;
 
+#if MINIBSON_PUBLIC
 /// <summary>
 /// A low-level, forward-only BSON reader.
 /// </summary>
 public sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDisposable
+#else
+/// <summary>
+/// A low-level, forward-only BSON reader.
+/// </summary>
+internal sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDisposable
+#endif
 {
     private readonly Stream _stream = stream ?? throw new ArgumentNullException(nameof(stream));
     private readonly BinaryReader _reader = new(stream, Encoding.UTF8, leaveOpen: true);

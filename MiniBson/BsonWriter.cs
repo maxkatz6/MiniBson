@@ -3,10 +3,17 @@ using System.Text;
 
 namespace MiniBson;
 
+#if MINIBSON_PUBLIC
 /// <summary>
 /// BSON element types as defined in the BSON specification.
 /// </summary>
 public enum BsonType : byte
+#else
+/// <summary>
+/// BSON element types as defined in the BSON specification.
+/// </summary>
+internal enum BsonType : byte
+#endif
 {
     Double = 0x01,
     String = 0x02,
@@ -31,10 +38,17 @@ public enum BsonType : byte
     MaxKey = 0x7F,
 }
 
+#if MINIBSON_PUBLIC
 /// <summary>
 /// BSON binary subtypes.
 /// </summary>
 public enum BsonBinarySubType : byte
+#else
+/// <summary>
+/// BSON binary subtypes.
+/// </summary>
+internal enum BsonBinarySubType : byte
+#endif
 {
     Generic = 0x00,
     Function = 0x01,
@@ -47,10 +61,17 @@ public enum BsonBinarySubType : byte
     UserDefined = 0x80,
 }
 
+#if MINIBSON_PUBLIC
 /// <summary>
 /// A low-level, forward-only BSON writer.
 /// </summary>
 public sealed class BsonWriter(Stream stream, bool leaveOpen = false) : IDisposable
+#else
+/// <summary>
+/// A low-level, forward-only BSON writer.
+/// </summary>
+internal sealed class BsonWriter(Stream stream, bool leaveOpen = false) : IDisposable
+#endif
 {
     private readonly Stream _stream = stream ?? throw new ArgumentNullException(nameof(stream));
     private readonly BinaryWriter _writer = new(stream, Encoding.UTF8, leaveOpen: true);

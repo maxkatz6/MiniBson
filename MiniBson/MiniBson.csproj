@@ -8,6 +8,8 @@
         <IsTrimmable>true</IsTrimmable>
         <IsAotCompatible>true</IsAotCompatible>
         <DisableRuntimeMarshalling>true</DisableRuntimeMarshalling>
+        <!-- Types are public in the normal package -->
+        <DefineConstants>$(DefineConstants);MINIBSON_PUBLIC</DefineConstants>
     </PropertyGroup>
 
     <!-- NuGet Package Properties -->

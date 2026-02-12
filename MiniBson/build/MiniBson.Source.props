@@ -1,6 +1,8 @@
 <Project>
   <PropertyGroup>
     <MiniBsonSourceIncluded>true</MiniBsonSourceIncluded>
+    <!-- By default, types are internal in source package. Set MiniBsonPublic=true to make them public. -->
+    <DefineConstants Condition="'$(MiniBsonPublic)' == 'true'">$(DefineConstants);MINIBSON_PUBLIC</DefineConstants>
   </PropertyGroup>
 </Project>
 
