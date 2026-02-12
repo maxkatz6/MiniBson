@@ -106,6 +106,16 @@ public class Type3 : Type1
     public string Description { get; set; } = string.Empty;
     public DateTime CreatedAt { get; set; }
 }
+
+// Record types for testing
+public record SimpleRecord(string Name, int Value);
+
+public record RecordWithNullables(string? NullableName, int? NullableValue);
+
+public record RecordWithArray(int[] Numbers, string[] Tags);
+
+public record NestedRecord(string Title, SimpleRecord? Inner);
+
 // Generated context
 [BsonSerializable(typeof(SimpleType))]
 [BsonSerializable(typeof(TypeWithNullables))]
@@ -119,6 +129,10 @@ public class Type3 : Type1
 [BsonSerializable(typeof(Type1))]
 [BsonSerializable(typeof(Type2))]
 [BsonSerializable(typeof(Type3))]
+[BsonSerializable(typeof(SimpleRecord))]
+[BsonSerializable(typeof(RecordWithNullables))]
+[BsonSerializable(typeof(RecordWithArray))]
+[BsonSerializable(typeof(NestedRecord))]
 public partial class TestBsonContext;
 
 [TestClass]
@@ -861,6 +875,95 @@ public sealed class BsonGeneratorTests
 
         Assert.IsFalse(reader.Read());
         reader.ReadEndDocument();
+    }
+
+    [TestMethod]
+    public void SerializeAndDeserializeNestedRecord()
+    {
+        var original = new NestedRecord("Parent", new SimpleRecord("Child", 999));
+
+        using var ms = new MemoryStream();
+        _context.Serialize(original, ms);
+
+        ms.Position = 0;
+        var result = (NestedRecord?)_context.Deserialize(ms, typeof(NestedRecord));
+
+        Assert.IsNotNull(result);
+        Assert.AreEqual(original.Title, result.Title);
+        Assert.IsNotNull(result.Inner);
+        Assert.AreEqual(original.Inner.Name, result.Inner.Name);
+        Assert.AreEqual(original.Inner.Value, result.Inner.Value);
+    }
+
+    [TestMethod]
+    public void SerializeAndDeserializeNestedRecord_WithNullInner()
+    {
+        var original = new NestedRecord("Lonely", null);
+
+        using var ms = new MemoryStream();
+        _context.Serialize(original, ms);
+
+        ms.Position = 0;
+        var result = (NestedRecord?)_context.Deserialize(ms, typeof(NestedRecord));
+
+        Assert.IsNotNull(result);
+        Assert.AreEqual(original.Title, result.Title);
+        Assert.IsNull(result.Inner);
+    }
+
+    [TestMethod]
+    public void NestedRecordSerializesBsonCorrectly()
+    {
+        var original = new NestedRecord("Outer", new SimpleRecord("Inner", 50));
+
+        using var ms = new MemoryStream();
+        _context.Serialize(original, ms);
+
+        // Verify BSON structure
+        ms.Position = 0;
+        using var reader = new BsonReader(ms);
+        reader.ReadStartDocument();
+
+        Assert.IsTrue(reader.Read());
+        Assert.AreEqual("Title", reader.CurrentName);
+        Assert.AreEqual(BsonType.String, reader.CurrentType);
+        Assert.AreEqual("Outer", reader.ReadString());
+
+        Assert.IsTrue(reader.Read());
+        Assert.AreEqual("Inner", reader.CurrentName);
+        Assert.AreEqual(BsonType.Document, reader.CurrentType);
+        reader.ReadStartNestedDocument();
+
+        Assert.IsTrue(reader.Read());
+        Assert.AreEqual("Name", reader.CurrentName);
+        Assert.AreEqual("Inner", reader.ReadString());
+
+        Assert.IsTrue(reader.Read());
+        Assert.AreEqual("Value", reader.CurrentName);
+        Assert.AreEqual(50, reader.ReadInt32());
+
+        Assert.IsFalse(reader.Read());
+        reader.ReadEndDocument();
+
+        Assert.IsFalse(reader.Read());
+        reader.ReadEndDocument();
+    }
+
+    [TestMethod]
+    public void RecordsAreImmutable_DifferentInstanceAfterDeserialization()
+    {
+        var original = new SimpleRecord("Original", 1);
+
+        using var ms = new MemoryStream();
+        _context.Serialize(original, ms);
+
+        ms.Position = 0;
+        var result = (SimpleRecord?)_context.Deserialize(ms, typeof(SimpleRecord));
+
+        Assert.IsNotNull(result);
+        // Records use value equality
+        Assert.AreEqual(original, result);
+        Assert.AreNotSame(original, result);
     }
 }
 

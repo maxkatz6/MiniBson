@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Linq;
@@ -535,22 +536,53 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         sb.AppendLine();
 
         // Create and return the object
-        sb.AppendLine($"        return new {typeName}");
-        sb.AppendLine("        {");
+        var properties = GetAllProperties(type).ToList();
+        
+        // Check if type is a record by looking for a primary constructor with matching parameters
+        var isRecord = type.TypeKind == TypeKind.Class && 
+                       type.IsRecord &&
+                       type.Constructors.Any(c => !c.IsStatic && 
+                                                  c.Parameters.Length == properties.Count &&
+                                                  c.Parameters.All(p => properties.Any(prop => 
+                                                      prop.Name.Equals(p.Name, StringComparison.OrdinalIgnoreCase))));
 
-        var first = true;
-        foreach (var property in GetAllProperties(type))
+        if (isRecord)
         {
-            if (!first)
-                sb.AppendLine(",");
-            else
-                first = false;
+            // Use constructor for records
+            sb.AppendLine($"        return new {typeName}(");
+            var first = true;
+            foreach (var property in properties)
+            {
+                if (!first)
+                    sb.AppendLine(",");
+                else
+                    first = false;
 
-            sb.Append($"            {property.Name} = _{property.Name}");
+                sb.Append($"            _{property.Name}");
+            }
+            sb.AppendLine();
+            sb.AppendLine("        );");
         }
+        else
+        {
+            // Use object initializer for classes
+            sb.AppendLine($"        return new {typeName}");
+            sb.AppendLine("        {");
 
-        sb.AppendLine();
-        sb.AppendLine("        };");
+            var first = true;
+            foreach (var property in properties)
+            {
+                if (!first)
+                    sb.AppendLine(",");
+                else
+                    first = false;
+
+                sb.Append($"            {property.Name} = _{property.Name}");
+            }
+
+            sb.AppendLine();
+            sb.AppendLine("        };");
+        }
         sb.AppendLine("#nullable restore");
         sb.AppendLine("    }");
 
