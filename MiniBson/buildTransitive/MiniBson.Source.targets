@@ -1,0 +1,5 @@
+<Project>
+  <!-- Empty targets file for transitive dependencies -->
+  <!-- Source files are only included for direct package references -->
+</Project>
+

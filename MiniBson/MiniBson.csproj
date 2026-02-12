@@ -64,13 +64,20 @@
             <Pack>true</Pack>
             <PackagePath>contentFiles\cs\any\MiniBson\</PackagePath>
         </Content>
+        <!-- Props files (same for build and buildTransitive) -->
         <Content Include="build/MiniBson.Source.props">
             <Pack>true</Pack>
             <PackagePath>build/;buildTransitive/;buildMultiTargeting/</PackagePath>
         </Content>
+        <!-- Targets for direct references (includes Compile items) -->
         <Content Include="build/MiniBson.Source.targets">
             <Pack>true</Pack>
-            <PackagePath>build/;buildTransitive/;buildMultiTargeting/</PackagePath>
+            <PackagePath>build/;buildMultiTargeting/</PackagePath>
+        </Content>
+        <!-- Targets for transitive references (empty, no Compile items) -->
+        <Content Include="buildTransitive/MiniBson.Source.targets">
+            <Pack>true</Pack>
+            <PackagePath>buildTransitive/</PackagePath>
         </Content>
     </ItemGroup>
 
