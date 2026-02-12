@@ -241,6 +241,7 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
 
         sb.AppendLine($"    private void Write{methodName}(BsonWriter writer, {typeName} instance)");
         sb.AppendLine("    {");
+        sb.AppendLine("#nullable disable");
         sb.AppendLine("        writer.WriteStartDocument();");
 
         foreach (var member in type.GetMembers())
@@ -260,6 +261,7 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         }
 
         sb.AppendLine("        writer.WriteEndDocument();");
+        sb.AppendLine("#nullable restore");
         sb.AppendLine("    }");
     }
 
@@ -432,16 +434,19 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
 
         sb.AppendLine($"    private {typeName}? Read{methodName}(BsonReader reader)");
         sb.AppendLine("    {");
+        sb.AppendLine("#nullable disable");
         sb.AppendLine("        reader.ReadStartDocument();");
         sb.AppendLine($"        var result = Read{methodName}Inner(reader);");
         sb.AppendLine("        reader.ReadEndDocument();");
         sb.AppendLine("        return result;");
+        sb.AppendLine("#nullable restore");
         sb.AppendLine("    }");
         sb.AppendLine();
 
         // Generate inner read method (without ReadStartDocument/ReadEndDocument)
         sb.AppendLine($"    private {typeName} Read{methodName}Inner(BsonReader reader)");
         sb.AppendLine("    {");
+        sb.AppendLine("#nullable disable");
 
         // Declare variables for all properties
         foreach (var member in type.GetMembers())
@@ -512,12 +517,14 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
 
         sb.AppendLine();
         sb.AppendLine("        };");
+        sb.AppendLine("#nullable restore");
         sb.AppendLine("    }");
 
         // Generate inner write method (without WriteStartDocument/WriteEndDocument)
         sb.AppendLine();
         sb.AppendLine($"    private void Write{methodName}Inner(BsonWriter writer, {typeName} instance)");
         sb.AppendLine("    {");
+        sb.AppendLine("#nullable disable");
 
         foreach (var member in type.GetMembers())
         {
@@ -532,6 +539,7 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
             GenerateWriteProperty(sb, property.Name, property.Type, $"instance.{property.Name}");
         }
 
+        sb.AppendLine("#nullable restore");
         sb.AppendLine("    }");
     }
 
