@@ -1,0 +1,22 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MiniBson", "MiniBson\MiniBson.csproj", "{8089E0B2-E176-48E4-865A-0DA37E128605}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MiniBson.Tests", "MiniBson.Tests\MiniBson.Tests.csproj", "{2F025B17-2E3B-4055-9E55-73F7A5FFB086}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{8089E0B2-E176-48E4-865A-0DA37E128605}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{8089E0B2-E176-48E4-865A-0DA37E128605}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{8089E0B2-E176-48E4-865A-0DA37E128605}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{8089E0B2-E176-48E4-865A-0DA37E128605}.Release|Any CPU.Build.0 = Release|Any CPU
+		{2F025B17-2E3B-4055-9E55-73F7A5FFB086}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{2F025B17-2E3B-4055-9E55-73F7A5FFB086}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{2F025B17-2E3B-4055-9E55-73F7A5FFB086}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{2F025B17-2E3B-4055-9E55-73F7A5FFB086}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+EndGlobal
