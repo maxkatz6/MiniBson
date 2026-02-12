@@ -1,0 +1,6 @@
+<Project>
+  <ItemGroup>
+    <Compile Include="$(MSBuildThisFileDirectory)..\contentFiles\cs\any\MiniBson\*.cs" Link="MiniBson\%(Filename)%(Extension)" Visible="false" />
+  </ItemGroup>
+</Project>
+

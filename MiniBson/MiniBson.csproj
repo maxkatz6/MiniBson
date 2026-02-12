@@ -10,6 +10,49 @@
         <DisableRuntimeMarshalling>true</DisableRuntimeMarshalling>
     </PropertyGroup>
 
+    <!-- NuGet Package Properties -->
+    <PropertyGroup>
+        <PackageId>MiniBson</PackageId>
+        <Version>1.0.0</Version>
+        <Authors>maxkatz6</Authors>
+        <Description>A minimal, trimmable, AOT-compatible BSON reader/writer library without reflection.</Description>
+        <PackageTags>bson;mongodb;serialization;aot;trimming</PackageTags>
+        <PackageLicenseExpression>MIT</PackageLicenseExpression>
+        <PackageProjectUrl>https://github.com/maxkatz6/MiniBson</PackageProjectUrl>
+        <RepositoryUrl>https://github.com/maxkatz6/MiniBson.git</RepositoryUrl>
+        <RepositoryType>git</RepositoryType>
+        <PackageReadmeFile>README.md</PackageReadmeFile>
+    </PropertyGroup>
+
+    <!-- Source Package Support -->
+    <PropertyGroup Condition="'$(MiniBsonPackageAsSource)' == 'true'">
+        <PackageId>MiniBson.Source</PackageId>
+        <DevelopmentDependency>true</DevelopmentDependency>
+        <IncludeBuildOutput>false</IncludeBuildOutput>
+        <SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>
+        <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
+    </PropertyGroup>
+
+    <ItemGroup Condition="'$(MiniBsonPackageAsSource)' == 'true'">
+        <Content Include="$(MSBuildProjectDirectory)\*.cs" Exclude="$(MSBuildProjectDirectory)\obj\**">
+            <Pack>true</Pack>
+            <PackagePath>contentFiles\cs\any\MiniBson\</PackagePath>
+        </Content>
+        <Content Include="build/MiniBson.Source.props">
+            <Pack>true</Pack>
+            <PackagePath>build/;buildTransitive/;buildMultiTargeting/</PackagePath>
+        </Content>
+        <Content Include="build/MiniBson.Source.targets">
+            <Pack>true</Pack>
+            <PackagePath>build/;buildTransitive/;buildMultiTargeting/</PackagePath>
+        </Content>
+    </ItemGroup>
+
+    <!-- Include README in package -->
+    <ItemGroup>
+        <None Include="..\README.md" Pack="true" PackagePath="\" Condition="Exists('..\README.md')" />
+    </ItemGroup>
+
     <PropertyGroup Condition="$([MSBuild]::IsTargetFrameworkCompatible('$(TargetFramework)', 'net6.0')) AND '$(IsTrimmable)' != 'false'">
         <SuppressTrimAnalysisWarnings>false</SuppressTrimAnalysisWarnings>
         <EnableTrimAnalyzer Condition="'$(EnableTrimAnalyzer)' == ''">true</EnableTrimAnalyzer>
