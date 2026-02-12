@@ -50,21 +50,13 @@ public enum BsonBinarySubType : byte
 /// <summary>
 /// A low-level, forward-only BSON writer.
 /// </summary>
-public sealed class BsonWriter : IDisposable
+public sealed class BsonWriter(Stream stream, bool leaveOpen = false) : IDisposable
 {
-    private readonly Stream _stream;
-    private readonly BinaryWriter _writer;
-    private readonly bool _leaveOpen;
+    private readonly Stream _stream = stream ?? throw new ArgumentNullException(nameof(stream));
+    private readonly BinaryWriter _writer = new(stream, Encoding.UTF8, leaveOpen: true);
     private readonly Stack<long> _documentStartPositions = new();
     private int _arrayIndex;
     private readonly Stack<int> _arrayIndexStack = new();
-
-    public BsonWriter(Stream stream, bool leaveOpen = false)
-    {
-        _stream = stream ?? throw new ArgumentNullException(nameof(stream));
-        _writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true);
-        _leaveOpen = leaveOpen;
-    }
 
     /// <summary>
     /// Writes the start of a BSON document.
@@ -203,7 +195,11 @@ public sealed class BsonWriter : IDisposable
         
         WriteType(BsonType.ObjectId);
         WriteCString(name);
+#if NET6_0_OR_GREATER
         _writer.Write(value);
+#else
+        _writer.Write(value.ToArray());
+#endif
     }
 
     /// <summary>
@@ -215,7 +211,11 @@ public sealed class BsonWriter : IDisposable
         WriteCString(name);
         _writer.Write(value.Length);
         _writer.Write((byte)subType);
+#if NET6_0_OR_GREATER
         _writer.Write(value);
+#else
+        _writer.Write(value.ToArray());
+#endif
     }
 
     /// <summary>
@@ -224,7 +224,11 @@ public sealed class BsonWriter : IDisposable
     public void WriteGuid(string name, Guid value)
     {
         Span<byte> bytes = stackalloc byte[16];
+#if NET6_0_OR_GREATER
         value.TryWriteBytes(bytes);
+#else
+        value.ToByteArray().CopyTo(bytes);
+#endif
         WriteBinary(name, bytes, BsonBinarySubType.Uuid);
     }
 
@@ -360,7 +364,7 @@ public sealed class BsonWriter : IDisposable
     public void Dispose()
     {
         _writer.Dispose();
-        if (!_leaveOpen)
+        if (!leaveOpen)
             _stream.Dispose();
     }
 }

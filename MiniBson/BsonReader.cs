@@ -1,4 +1,3 @@
-using System.IO;
 using System.Text;
 
 namespace MiniBson;
@@ -6,24 +5,16 @@ namespace MiniBson;
 /// <summary>
 /// A low-level, forward-only BSON reader.
 /// </summary>
-public sealed class BsonReader : IDisposable
+public sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDisposable
 {
-    private readonly Stream _stream;
-    private readonly BinaryReader _reader;
-    private readonly bool _leaveOpen;
+    private readonly Stream _stream = stream ?? throw new ArgumentNullException(nameof(stream));
+    private readonly BinaryReader _reader = new(stream, Encoding.UTF8, leaveOpen: true);
     private readonly Stack<DocumentContext> _contextStack = new();
     
     private struct DocumentContext
     {
         public long EndPosition;
         public bool IsArray;
-    }
-
-    public BsonReader(Stream stream, bool leaveOpen = false)
-    {
-        _stream = stream ?? throw new ArgumentNullException(nameof(stream));
-        _reader = new BinaryReader(stream, Encoding.UTF8, leaveOpen: true);
-        _leaveOpen = leaveOpen;
     }
 
     public BsonReader(byte[] data) : this(new MemoryStream(data), leaveOpen: false)
@@ -432,7 +423,7 @@ public sealed class BsonReader : IDisposable
     public void Dispose()
     {
         _reader.Dispose();
-        if (!_leaveOpen)
+        if (!leaveOpen)
             _stream.Dispose();
     }
 }
