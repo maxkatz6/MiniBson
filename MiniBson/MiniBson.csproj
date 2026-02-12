@@ -99,4 +99,52 @@
     <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.0'">
         <PackageReference Include="System.Memory" Version="4.5.4" />
     </ItemGroup>
+
+    <UsingTask
+            TaskName="PatchNuSpecVersion"
+            TaskFactory="RoslynCodeTaskFactory"
+            AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll" >
+        <ParameterGroup>
+            <Filename ParameterType="System.String" Required="true" />
+            <Version ParameterType="System.String" Required="true" />
+        </ParameterGroup>
+        <Task>
+            <Using Namespace="System"/>
+            <Using Namespace="System.IO"/>
+            <Code Type="Fragment" Language="cs">
+                <![CDATA[
+                string[] lines = File.ReadAllLines(Filename);
+                for(var c = 0; c < lines.Length; c++)
+                    if(lines[c].Contains("<version>"))
+                        lines[c] = "<version>" + Version + "</version>";
+                File.WriteAllLines(Filename, lines);
+]]>
+            </Code>
+        </Task>
+    </UsingTask>
+
+    <Target Name="UpdateLocalNugetCache"
+            Condition="'$(IsInnerBuild)' != 'true' and '$(IsPackable)' == 'true'"
+            AfterTargets="Pack">
+        <PropertyGroup>
+            <LocalNugetCachePackageVersion>9999.0.0-localbuild</LocalNugetCachePackageVersion>
+            <LocalNugetCacheCacheDir>$(NuGetPackageRoot)/$(PackageId.ToLowerInvariant())/$(LocalNugetCachePackageVersion)</LocalNugetCacheCacheDir>
+            <GeneratedPackagePath>$(PackageOutputAbsolutePath)/$(PackageId).$(PackageVersion).nupkg</GeneratedPackagePath>
+        </PropertyGroup>
+        <RemoveDir Directories="$(LocalNugetCacheCacheDir)" />
+        <Unzip SourceFiles="$(GeneratedPackagePath)" DestinationFolder="$(LocalNugetCacheCacheDir)" />
+        <!-- Fix for case-sensetive file systems -->
+        <Move SourceFiles="$(LocalNugetCacheCacheDir)/$(PackageId).nuspec" DestinationFiles="$(LocalNugetCacheCacheDir)/$(PackageId).tmp" />
+        <Move SourceFiles="$(LocalNugetCacheCacheDir)/$(PackageId).tmp" DestinationFiles="$(LocalNugetCacheCacheDir)/$(PackageId.ToLowerInvariant()).nuspec" />
+        <WriteLinesToFile
+                File="$(LocalNugetCacheCacheDir)/.nupkg.metadata"
+                Overwrite="true"
+                Lines="{
+                &quot;version&quot;: 2,
+                &quot;contentHash&quot;: &quot;9dZAvxEPjiXE0jRGoWwrns+sSAwdk3A8w9JwgXF5xA7L9FQXu3zd5vYb9gewhIcfuuBBCG8z45GvwKkzQQbP6w==&quot;,
+        &quot;source&quot;: &quot;http://non-existing.example.com/index.json&quot;
+        }" />
+        <PatchNuSpecVersion Filename="$(LocalNugetCacheCacheDir)/$(PackageId.ToLowerInvariant()).nuspec"  Version="$(LocalNugetCachePackageVersion)"/>
+        <Message Text="Updated local NuGet cache with package $(PackageId) version $(LocalNugetCachePackageVersion) at $(LocalNugetCacheCacheDir)" Importance="high" />
+    </Target>
 </Project>

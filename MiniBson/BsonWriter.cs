@@ -232,8 +232,20 @@ internal sealed class BsonWriter(Stream stream, bool leaveOpen = false) : IDispo
     {
         WriteType(BsonType.Binary);
         WriteCString(name);
-        _writer.Write(value.Length);
-        _writer.Write((byte)subType);
+        
+        if (subType == BsonBinarySubType.BinaryOld)
+        {
+            // Old binary format includes an extra length prefix
+            _writer.Write(value.Length + 4);
+            _writer.Write((byte)subType);
+            _writer.Write(value.Length);
+        }
+        else
+        {
+            _writer.Write(value.Length);
+            _writer.Write((byte)subType);
+        }
+
 #if NET6_0_OR_GREATER
         _writer.Write(value);
 #else
