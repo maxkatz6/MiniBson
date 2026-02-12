@@ -1,4 +1,3 @@
-using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Linq;
@@ -44,7 +43,7 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
             return null;
 
         // Collect all types from [BsonSerializable(typeof(...))] attributes
-        var serializableTypes = new List<INamedTypeSymbol>();
+        var serializableTypes = new List<TypeInfo>();
 
         foreach (var attribute in classSymbol.GetAttributes())
         {
@@ -54,7 +53,7 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
             if (attribute.ConstructorArguments.Length > 0 &&
                 attribute.ConstructorArguments[0].Value is INamedTypeSymbol typeSymbol)
             {
-                serializableTypes.Add(typeSymbol);
+                serializableTypes.Add(ExtractTypeInfo(typeSymbol));
             }
         }
 
@@ -65,7 +64,7 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
             classSymbol.ContainingNamespace?.ToDisplayString() ?? string.Empty,
             classSymbol.Name,
             GetAccessibility(classDeclaration),
-            serializableTypes.ToImmutableArray());
+            new EquatableList<TypeInfo>(serializableTypes));
     }
 
     private static string GetAccessibility(ClassDeclarationSyntax classDeclaration)
@@ -93,11 +92,11 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
     {
         foreach (var contextClass in contextClasses)
         {
-            if (contextClass is null)
+            if (contextClass is not { } ctx)
                 continue;
 
-            var source = GenerateContextClass(contextClass);
-            context.AddSource($"{contextClass.ClassName}.g.cs", SourceText.From(source, Encoding.UTF8));
+            var source = GenerateContextClass(ctx);
+            context.AddSource($"{ctx.ClassName}.g.cs", SourceText.From(source, Encoding.UTF8));
         }
     }
 
@@ -125,14 +124,14 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         sb.AppendLine("{");
 
         // Collect all types that need serialization (including nested types)
-        var allTypes = new HashSet<INamedTypeSymbol>(SymbolEqualityComparer.Default);
+        var allTypes = new Dictionary<string, TypeInfo>();
         foreach (var type in contextClass.SerializableTypes)
         {
             CollectAllTypes(type, allTypes);
         }
 
         // Generate Write/Read methods for each type
-        foreach (var type in allTypes)
+        foreach (var type in allTypes.Values)
         {
             GenerateWriteMethod(sb, type);
             sb.AppendLine();
@@ -152,47 +151,36 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         return sb.ToString();
     }
 
-    private static void CollectAllTypes(ITypeSymbol type, HashSet<INamedTypeSymbol> allTypes)
+    private static void CollectAllTypes(TypeInfo type, Dictionary<string, TypeInfo> allTypes)
     {
-        var unwrapped = UnwrapType(type);
-        if (unwrapped is not INamedTypeSymbol namedType)
+        if (allTypes.ContainsKey(type.FullyQualifiedName))
             return;
 
-        if (IsPrimitiveType(namedType))
-            return;
-
-        if (!allTypes.Add(namedType))
-            return;
+        allTypes[type.FullyQualifiedName] = type;
 
         // Collect types from properties
-        foreach (var member in namedType.GetMembers())
+        foreach (var property in type.Properties)
         {
-            if (member is IPropertySymbol property &&
-                property.DeclaredAccessibility == Accessibility.Public &&
-                !property.IsStatic &&
-                property.GetMethod != null)
-            {
-                CollectAllTypes(property.Type, allTypes);
-            }
+            CollectAllTypesFromRef(property.Type, allTypes);
         }
     }
 
-    private static ITypeSymbol UnwrapType(ITypeSymbol type)
+    private static void CollectAllTypesFromRef(TypeRefInfo typeRef, Dictionary<string, TypeInfo> allTypes)
     {
-        // Unwrap nullable
-        if (type is INamedTypeSymbol { IsGenericType: true } namedType &&
-            namedType.OriginalDefinition.SpecialType == SpecialType.System_Nullable_T)
+        if (typeRef.NestedTypeInfo is { } nested)
         {
-            return namedType.TypeArguments[0];
+            CollectAllTypes(nested, allTypes);
         }
 
-        // Unwrap array
-        if (type is IArrayTypeSymbol arrayType)
+        if (typeRef.ArrayElementType is { } arrayElement)
         {
-            return arrayType.ElementType;
+            CollectAllTypesFromRef(arrayElement, allTypes);
         }
 
-        return type;
+        if (typeRef.NullableUnderlyingType is { } nullableUnderlying)
+        {
+            CollectAllTypesFromRef(nullableUnderlying, allTypes);
+        }
     }
 
     private static bool IsPrimitiveType(ITypeSymbol type)
@@ -220,40 +208,9 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         };
     }
 
-    private static bool IsNullableType(ITypeSymbol type)
+    private static void GenerateWriteMethod(StringBuilder sb, TypeInfo type)
     {
-        if (type is INamedTypeSymbol { IsGenericType: true } namedType &&
-            namedType.OriginalDefinition.SpecialType == SpecialType.System_Nullable_T)
-        {
-            return true;
-        }
-
-        return type.NullableAnnotation == NullableAnnotation.Annotated;
-    }
-
-    private static ITypeSymbol? GetEnumUnderlyingType(ITypeSymbol type)
-    {
-        if (type.TypeKind == TypeKind.Enum && type is INamedTypeSymbol namedType)
-        {
-            return namedType.EnumUnderlyingType;
-        }
-        return null;
-    }
-
-    private static ITypeSymbol GetUnderlyingNullableType(ITypeSymbol type)
-    {
-        if (type is INamedTypeSymbol { IsGenericType: true } namedType &&
-            namedType.OriginalDefinition.SpecialType == SpecialType.System_Nullable_T)
-        {
-            return namedType.TypeArguments[0];
-        }
-
-        return type;
-    }
-
-    private static void GenerateWriteMethod(StringBuilder sb, INamedTypeSymbol type)
-    {
-        var typeName = type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+        var typeName = type.FullyQualifiedName;
         var methodName = GetSafeMethodName(type);
 
         sb.AppendLine($"    private void Write{methodName}(BsonWriter writer, {typeName} instance)");
@@ -262,7 +219,7 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         sb.AppendLine("        writer.WriteStartDocument();");
 
         // Get all properties including inherited ones
-        foreach (var property in GetAllProperties(type))
+        foreach (var property in type.Properties)
         {
             GenerateWriteProperty(sb, property.Name, property.Type, $"instance.{property.Name}");
         }
@@ -272,10 +229,10 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         sb.AppendLine("    }");
     }
 
-    private static void GenerateWriteProperty(StringBuilder sb, string name, ITypeSymbol type, string accessor)
+    private static void GenerateWriteProperty(StringBuilder sb, string name, TypeRefInfo type, string accessor)
     {
-        var isNullable = IsNullableType(type);
-        var underlyingType = GetUnderlyingNullableType(type);
+        var isNullable = type.IsNullable;
+        var underlyingType = type.NullableUnderlyingType ?? type;
 
         if (isNullable && !type.IsValueType)
         {
@@ -301,47 +258,43 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         }
     }
 
-    private static void GenerateWriteValue(StringBuilder sb, string name, ITypeSymbol type, string accessor, string indent)
+    private static void GenerateWriteValue(StringBuilder sb, string name, TypeRefInfo type, string accessor, string indent)
     {
         // Handle byte[] as binary data
-        if (type is IArrayTypeSymbol { ElementType.SpecialType: SpecialType.System_Byte })
+        if (type.ArrayElementType is { SpecialType: SpecialType.System_Byte })
         {
             sb.AppendLine($"{indent}writer.WriteBinary(\"{name}\", {accessor});");
             return;
         }
 
         // Handle arrays of enums
-        if (type is IArrayTypeSymbol { ElementType.TypeKind: TypeKind.Enum } enumArrayType)
+        if (type.ArrayElementType is { TypeKind: TypeKind.Enum } enumArrayElementType)
         {
-            var elementType = enumArrayType.ElementType;
             sb.AppendLine($"{indent}writer.WriteStartArray(\"{name}\");");
             sb.AppendLine($"{indent}foreach (var item in {accessor})");
             sb.AppendLine($"{indent}{{");
-            GenerateWriteArrayElement(sb, elementType, "item", indent + "    ");
+            GenerateWriteArrayElement(sb, enumArrayElementType, "item", indent + "    ");
             sb.AppendLine($"{indent}}}");
             sb.AppendLine($"{indent}writer.WriteEndArray();");
             return;
         }
 
         // Handle other arrays
-        if (type is IArrayTypeSymbol arrayType)
+        if (type.ArrayElementType is { } arrayElementType)
         {
-            var elementType = arrayType.ElementType;
             sb.AppendLine($"{indent}writer.WriteStartArray(\"{name}\");");
             sb.AppendLine($"{indent}foreach (var item in {accessor})");
             sb.AppendLine($"{indent}{{");
-            GenerateWriteArrayElement(sb, elementType, "item", indent + "    ");
+            GenerateWriteArrayElement(sb, arrayElementType, "item", indent + "    ");
             sb.AppendLine($"{indent}}}");
             sb.AppendLine($"{indent}writer.WriteEndArray();");
             return;
         }
 
         // Handle enums - map to underlying type
-        var enumUnderlying = GetEnumUnderlyingType(type);
-        if (enumUnderlying != null)
+        if (type.EnumUnderlyingType is { } enumUnderlying)
         {
-            var underlyingSpecial = enumUnderlying.SpecialType;
-            if (underlyingSpecial == SpecialType.System_Int64 || underlyingSpecial == SpecialType.System_UInt64 || underlyingSpecial == SpecialType.System_UInt32)
+            if (enumUnderlying == SpecialType.System_Int64 || enumUnderlying == SpecialType.System_UInt64 || enumUnderlying == SpecialType.System_UInt32)
             {
                 sb.AppendLine($"{indent}writer.WriteInt64(\"{name}\", (long){accessor});");
             }
@@ -383,26 +336,26 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         }
 
         // Handle Guid
-        if (type.ToDisplayString() == "System.Guid")
+        if (type.FullyQualifiedName == "global::System.Guid" || type.Name == "Guid")
         {
             sb.AppendLine($"{indent}writer.WriteGuid(\"{name}\", {accessor});");
             return;
         }
 
         // Handle nested objects (but not primitives)
-        if (type is INamedTypeSymbol namedType && !IsPrimitiveType(namedType))
+        if (type.NestedTypeInfo is { } nestedType)
         {
-            var methodName = GetSafeMethodName(namedType);
+            var methodName = GetSafeMethodName(nestedType);
             sb.AppendLine($"{indent}writer.WriteStartDocument(\"{name}\");");
             sb.AppendLine($"{indent}Write{methodName}Inner(writer, {accessor});");
             sb.AppendLine($"{indent}writer.WriteEndDocument();");
         }
     }
 
-    private static void GenerateWriteArrayElement(StringBuilder sb, ITypeSymbol type, string accessor, string indent)
+    private static void GenerateWriteArrayElement(StringBuilder sb, TypeRefInfo type, string accessor, string indent)
     {
-        var isNullable = IsNullableType(type);
-        var underlyingType = GetUnderlyingNullableType(type);
+        var isNullable = type.IsNullable;
+        var underlyingType = type.NullableUnderlyingType ?? type;
 
         if (isNullable && !type.IsValueType)
         {
@@ -428,14 +381,12 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         }
     }
 
-    private static void GenerateWriteArrayElementValue(StringBuilder sb, ITypeSymbol type, string accessor, string indent)
+    private static void GenerateWriteArrayElementValue(StringBuilder sb, TypeRefInfo type, string accessor, string indent)
     {
         // Handle enums - map to underlying type
-        var enumUnderlying = GetEnumUnderlyingType(type);
-        if (enumUnderlying != null)
+        if (type.EnumUnderlyingType is { } enumUnderlying)
         {
-            var underlyingSpecial = enumUnderlying.SpecialType;
-            if (underlyingSpecial == SpecialType.System_Int64 || underlyingSpecial == SpecialType.System_UInt64 || underlyingSpecial == SpecialType.System_UInt32)
+            if (enumUnderlying == SpecialType.System_Int64 || enumUnderlying == SpecialType.System_UInt64 || enumUnderlying == SpecialType.System_UInt32)
             {
                 sb.AppendLine($"{indent}writer.WriteInt64((long){accessor});");
             }
@@ -477,18 +428,18 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         }
 
         // Handle nested objects in array (but not primitives)
-        if (type is INamedTypeSymbol namedType && !IsPrimitiveType(namedType))
+        if (type.NestedTypeInfo is { } nestedType)
         {
-            var methodName = GetSafeMethodName(namedType);
+            var methodName = GetSafeMethodName(nestedType);
             sb.AppendLine($"{indent}writer.WriteStartNestedDocument();");
             sb.AppendLine($"{indent}Write{methodName}Inner(writer, {accessor});");
             sb.AppendLine($"{indent}writer.WriteEndDocument();");
         }
     }
 
-    private static void GenerateReadMethod(StringBuilder sb, INamedTypeSymbol type)
+    private static void GenerateReadMethod(StringBuilder sb, TypeInfo type)
     {
-        var typeName = type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+        var typeName = type.FullyQualifiedName;
         var methodName = GetSafeMethodName(type);
 
         sb.AppendLine($"    private {typeName}? Read{methodName}(BsonReader reader)");
@@ -508,9 +459,9 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         sb.AppendLine("#nullable disable");
 
         // Declare variables for all properties including inherited
-        foreach (var property in GetAllProperties(type))
+        foreach (var property in type.Properties)
         {
-            var propertyType = property.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+            var propertyType = property.Type.FullyQualifiedName;
             var defaultValue = GetDefaultValue(property.Type);
             sb.AppendLine($"        {propertyType} _{property.Name} = {defaultValue};");
         }
@@ -521,7 +472,7 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         sb.AppendLine("            switch (reader.CurrentName)");
         sb.AppendLine("            {");
 
-        foreach (var property in GetAllProperties(type))
+        foreach (var property in type.Properties)
         {
             sb.AppendLine($"                case \"{property.Name}\":");
             GenerateReadProperty(sb, property.Name, property.Type, "                    ");
@@ -536,15 +487,10 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         sb.AppendLine();
 
         // Create and return the object
-        var properties = GetAllProperties(type).ToList();
+        var properties = type.Properties.ToList();
         
-        // Check if type is a record by looking for a primary constructor with matching parameters
-        var isRecord = type.TypeKind == TypeKind.Class && 
-                       type.IsRecord &&
-                       type.Constructors.Any(c => !c.IsStatic && 
-                                                  c.Parameters.Length == properties.Count &&
-                                                  c.Parameters.All(p => properties.Any(prop => 
-                                                      prop.Name.Equals(p.Name, StringComparison.OrdinalIgnoreCase))));
+        // Check if type is a record
+        var isRecord = type.IsRecord;
 
         if (isRecord)
         {
@@ -592,7 +538,7 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         sb.AppendLine("    {");
         sb.AppendLine("#nullable disable");
 
-        foreach (var property in GetAllProperties(type))
+        foreach (var property in type.Properties)
         {
 
             GenerateWriteProperty(sb, property.Name, property.Type, $"instance.{property.Name}");
@@ -602,9 +548,9 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         sb.AppendLine("    }");
     }
 
-    private static string GetDefaultValue(ITypeSymbol type)
+    private static string GetDefaultValue(TypeRefInfo type)
     {
-        if (IsNullableType(type) || !type.IsValueType)
+        if (type.IsNullable || !type.IsValueType)
             return "default!";
 
         return type.SpecialType switch
@@ -619,23 +565,22 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         };
     }
 
-    private static void GenerateReadProperty(StringBuilder sb, string name, ITypeSymbol type, string indent)
+    private static void GenerateReadProperty(StringBuilder sb, string name, TypeRefInfo type, string indent)
     {
-        var isNullable = IsNullableType(type);
-        var underlyingType = GetUnderlyingNullableType(type);
+        var underlyingType = type.NullableUnderlyingType ?? type;
 
         sb.AppendLine($"{indent}if (reader.CurrentType == BsonType.Null)");
         sb.AppendLine($"{indent}    _{name} = default;");
         sb.AppendLine($"{indent}else");
 
         // Handle byte[] as binary data
-        if (type is IArrayTypeSymbol { ElementType.SpecialType: SpecialType.System_Byte })
+        if (type.ArrayElementType is { SpecialType: SpecialType.System_Byte })
         {
             sb.AppendLine($"{indent}    _{name} = reader.ReadBinary().Data;");
         }
-        else if (type is IArrayTypeSymbol arrayType)
+        else if (type.ArrayElementType is { } arrayElementType)
         {
-            GenerateReadArray(sb, name, arrayType, indent + "    ");
+            GenerateReadArray(sb, name, arrayElementType, indent + "    ");
         }
         else
         {
@@ -643,10 +588,9 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         }
     }
 
-    private static void GenerateReadArray(StringBuilder sb, string name, IArrayTypeSymbol arrayType, string indent)
+    private static void GenerateReadArray(StringBuilder sb, string name, TypeRefInfo elementType, string indent)
     {
-        var elementType = arrayType.ElementType;
-        var elementTypeName = elementType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+        var elementTypeName = elementType.FullyQualifiedName;
 
         sb.AppendLine($"{indent}{{");
         sb.AppendLine($"{indent}    var list = new global::System.Collections.Generic.List<{elementTypeName}>();");
@@ -654,8 +598,8 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         sb.AppendLine($"{indent}    while (reader.Read())");
         sb.AppendLine($"{indent}    {{");
 
-        var isElementNullable = IsNullableType(elementType);
-        var underlyingElementType = GetUnderlyingNullableType(elementType);
+        var isElementNullable = elementType.IsNullable;
+        var underlyingElementType = elementType.NullableUnderlyingType ?? elementType;
 
         if (isElementNullable || !elementType.IsValueType)
         {
@@ -675,15 +619,13 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         sb.AppendLine($"{indent}}}");
     }
 
-    private static void GenerateReadArrayElement(StringBuilder sb, ITypeSymbol type, string indent)
+    private static void GenerateReadArrayElement(StringBuilder sb, TypeRefInfo type, string indent)
     {
         // Handle enums - read as underlying type and cast
-        var enumUnderlying = GetEnumUnderlyingType(type);
-        if (enumUnderlying != null)
+        if (type.EnumUnderlyingType is { } enumUnderlying)
         {
-            var typeName = type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
-            var underlyingSpecial = enumUnderlying.SpecialType;
-            if (underlyingSpecial == SpecialType.System_Int64 || underlyingSpecial == SpecialType.System_UInt64 || underlyingSpecial == SpecialType.System_UInt32)
+            var typeName = type.FullyQualifiedName;
+            if (enumUnderlying == SpecialType.System_Int64 || enumUnderlying == SpecialType.System_UInt64 || enumUnderlying == SpecialType.System_UInt32)
             {
                 sb.AppendLine($"{indent}list.Add(({typeName})reader.ReadInt64());");
             }
@@ -719,16 +661,16 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
                 return;
         }
 
-        if (type.ToDisplayString() == "System.Guid")
+        if (type.FullyQualifiedName == "global::System.Guid" || type.Name == "Guid")
         {
             sb.AppendLine($"{indent}list.Add(reader.ReadGuid());");
             return;
         }
 
         // Nested object (but not primitives)
-        if (type is INamedTypeSymbol namedType && !IsPrimitiveType(namedType))
+        if (type.NestedTypeInfo is { } nestedType)
         {
-            var methodName = GetSafeMethodName(namedType);
+            var methodName = GetSafeMethodName(nestedType);
             sb.AppendLine($"{indent}{{");
             sb.AppendLine($"{indent}    reader.ReadStartNestedDocument();");
             sb.AppendLine($"{indent}    list.Add(Read{methodName}Inner(reader));");
@@ -737,15 +679,13 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         }
     }
 
-    private static void GenerateReadValue(StringBuilder sb, string name, ITypeSymbol type, string indent)
+    private static void GenerateReadValue(StringBuilder sb, string name, TypeRefInfo type, string indent)
     {
         // Handle enums - read as underlying type and cast
-        var enumUnderlying = GetEnumUnderlyingType(type);
-        if (enumUnderlying != null)
+        if (type.EnumUnderlyingType is { } enumUnderlying)
         {
-            var typeName = type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
-            var underlyingSpecial = enumUnderlying.SpecialType;
-            if (underlyingSpecial == SpecialType.System_Int64 || underlyingSpecial == SpecialType.System_UInt64 || underlyingSpecial == SpecialType.System_UInt32)
+            var typeName = type.FullyQualifiedName;
+            if (enumUnderlying == SpecialType.System_Int64 || enumUnderlying == SpecialType.System_UInt64 || enumUnderlying == SpecialType.System_UInt32)
             {
                 sb.AppendLine($"{indent}_{name} = ({typeName})reader.ReadInt64();");
             }
@@ -787,16 +727,16 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
                 return;
         }
 
-        if (type.ToDisplayString() == "System.Guid")
+        if (type.FullyQualifiedName == "global::System.Guid" || type.Name == "Guid")
         {
             sb.AppendLine($"{indent}_{name} = reader.ReadGuid();");
             return;
         }
 
         // Nested object (but not primitives)
-        if (type is INamedTypeSymbol namedType && !IsPrimitiveType(namedType))
+        if (type.NestedTypeInfo is { } nestedType)
         {
-            var methodName = GetSafeMethodName(namedType);
+            var methodName = GetSafeMethodName(nestedType);
             sb.AppendLine($"{indent}{{");
             sb.AppendLine($"{indent}    reader.ReadStartNestedDocument();");
             sb.AppendLine($"{indent}    _{name} = Read{methodName}Inner(reader);");
@@ -805,7 +745,7 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         }
     }
 
-    private static void GenerateSerializeMethod(StringBuilder sb, ImmutableArray<INamedTypeSymbol> types)
+    private static void GenerateSerializeMethod(StringBuilder sb, EquatableList<TypeInfo> types)
     {
         sb.AppendLine("    /// <summary>");
         sb.AppendLine("    /// Serializes the specified object to BSON format.");
@@ -818,7 +758,7 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         var first = true;
         foreach (var type in types)
         {
-            var typeName = type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+            var typeName = type.FullyQualifiedName;
             var methodName = GetSafeMethodName(type);
             
             if (first)
@@ -839,7 +779,7 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         sb.AppendLine("    }");
     }
 
-    private static void GenerateDeserializeMethod(StringBuilder sb, ImmutableArray<INamedTypeSymbol> types)
+    private static void GenerateDeserializeMethod(StringBuilder sb, EquatableList<TypeInfo> types)
     {
         sb.AppendLine("    /// <summary>");
         sb.AppendLine("    /// Deserializes BSON data to an object of the specified type.");
@@ -851,7 +791,7 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         var first = true;
         foreach (var type in types)
         {
-            var typeName = type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+            var typeName = type.FullyQualifiedName;
             var methodName = GetSafeMethodName(type);
 
             if (first)
@@ -910,31 +850,79 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         return properties;
     }
 
-    private static string GetSafeMethodName(INamedTypeSymbol type)
+    private static string GetSafeMethodName(TypeInfo type)
     {
         // Create a safe method name from the type name
         return type.Name.Replace(".", "_").Replace("+", "_");
     }
 
-    private sealed class ContextClassInfo
+    private static TypeInfo ExtractTypeInfo(INamedTypeSymbol symbol, HashSet<INamedTypeSymbol>? visited = null)
     {
-        public string Namespace { get; }
-        public string ClassName { get; }
-        public string Accessibility { get; }
-        public ImmutableArray<INamedTypeSymbol> SerializableTypes { get; }
+        visited ??= new HashSet<INamedTypeSymbol>(SymbolEqualityComparer.Default);
+        if (!visited.Add(symbol))
+            return new TypeInfo(
+                symbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
+                symbol.Name,
+                false,
+                symbol.IsValueType,
+                EquatableList<PropertyInfo>.Empty);
 
-        public ContextClassInfo(
-            string ns,
-            string className,
-            string accessibility,
-            ImmutableArray<INamedTypeSymbol> serializableTypes)
+        var properties = GetAllProperties(symbol)
+            .Select(p => new PropertyInfo(p.Name, ExtractTypeRefInfo(p.Type, visited)))
+            .ToList();
+
+        return new TypeInfo(
+            symbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
+            symbol.Name,
+            symbol.IsRecord && symbol.TypeKind == TypeKind.Class,
+            symbol.IsValueType,
+            new EquatableList<PropertyInfo>(properties));
+    }
+
+    private static TypeRefInfo ExtractTypeRefInfo(ITypeSymbol symbol, HashSet<INamedTypeSymbol> visited)
+    {
+        var isNullableValueType = symbol is INamedTypeSymbol { IsGenericType: true } nt &&
+                                  nt.OriginalDefinition.SpecialType == SpecialType.System_Nullable_T;
+        var isNullable = isNullableValueType || symbol.NullableAnnotation == NullableAnnotation.Annotated;
+
+        TypeRefInfo? nullableUnderlying = null;
+        if (isNullableValueType && symbol is INamedTypeSymbol nvt)
         {
-            Namespace = ns;
-            ClassName = className;
-            Accessibility = accessibility;
-            SerializableTypes = serializableTypes;
+            nullableUnderlying = ExtractTypeRefInfo(nvt.TypeArguments[0], visited);
         }
+
+        TypeRefInfo? arrayElement = null;
+        if (symbol is IArrayTypeSymbol arrayType)
+        {
+            arrayElement = ExtractTypeRefInfo(arrayType.ElementType, visited);
+        }
+
+        SpecialType? enumUnderlying = null;
+        if (symbol.TypeKind == TypeKind.Enum && symbol is INamedTypeSymbol enumType)
+        {
+            enumUnderlying = enumType.EnumUnderlyingType?.SpecialType;
+        }
+
+        TypeInfo? nestedTypeInfo = null;
+        if (symbol is INamedTypeSymbol namedType && 
+            !IsPrimitiveType(symbol) && 
+            symbol is not IArrayTypeSymbol &&
+            !isNullableValueType)
+        {
+            nestedTypeInfo = ExtractTypeInfo(namedType, visited);
+        }
+
+        return new TypeRefInfo(
+            symbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
+            symbol is INamedTypeSymbol ns ? ns.Name : symbol.Name,
+            symbol.SpecialType,
+            symbol.IsValueType,
+            isNullable,
+            symbol.NullableAnnotation,
+            symbol.TypeKind,
+            enumUnderlying,
+            arrayElement,
+            nullableUnderlying,
+            nestedTypeInfo);
     }
 }
-
-
