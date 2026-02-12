@@ -105,6 +105,10 @@ reader.ReadEndDocument();
 | Int64 | `WriteInt64` | `ReadInt64` |
 | GUID | `WriteGuid` | `ReadGuid` |
 
+## Acknowledgments
+
+A substantial part of the code in this project was generated with assistance from [Claude](https://www.anthropic.com/claude).
+
 ## License
 
 MIT License - see LICENSE file for details.
