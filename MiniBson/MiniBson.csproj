@@ -17,18 +17,43 @@
         <PackageId>MiniBson</PackageId>
         <Version>1.0.0</Version>
         <Authors>maxkatz6</Authors>
-        <Description>A minimal, trimmable, AOT-compatible BSON reader/writer library without reflection.</Description>
-        <PackageTags>bson;mongodb;serialization;aot;trimming</PackageTags>
+        <Description>A minimal, trimmable, AOT-compatible BSON reader/writer library without reflection. Includes source generator for automatic serialization.</Description>
+        <PackageTags>bson;mongodb;serialization;aot;trimming;source-generator</PackageTags>
         <PackageLicenseExpression>MIT</PackageLicenseExpression>
         <PackageProjectUrl>https://github.com/maxkatz6/MiniBson</PackageProjectUrl>
         <RepositoryUrl>https://github.com/maxkatz6/MiniBson.git</RepositoryUrl>
         <RepositoryType>git</RepositoryType>
         <PackageReadmeFile>README.md</PackageReadmeFile>
+        <DevelopmentDependency>false</DevelopmentDependency>
+        <IncludeSymbols>false</IncludeSymbols>
     </PropertyGroup>
+
+    <!-- Generator embedding - include generator DLL in the package -->
+    <ItemGroup>
+        <ProjectReference Include="..\MiniBson.Generator\MiniBson.Generator.csproj" PrivateAssets="all" ReferenceOutputAssembly="false" />
+    </ItemGroup>
+
+    <PropertyGroup>
+        <GetTargetPathDependsOn>$(GetTargetPathDependsOn);GetGeneratorTargetPath</GetTargetPathDependsOn>
+    </PropertyGroup>
+
+    <Target Name="GetGeneratorTargetPath">
+        <MSBuild Projects="..\MiniBson.Generator\MiniBson.Generator.csproj" Targets="GetTargetPath">
+            <Output TaskParameter="TargetOutputs" ItemName="GeneratorAssembly" />
+        </MSBuild>
+    </Target>
+
+    <ItemGroup>
+        <None Include="$(MSBuildProjectDirectory)\..\MiniBson.Generator\bin\$(Configuration)\netstandard2.0\MiniBson.Generator.dll"
+              Pack="true"
+              PackagePath="analyzers/dotnet/cs"
+              Visible="false" />
+    </ItemGroup>
 
     <!-- Source Package Support -->
     <PropertyGroup Condition="'$(MiniBsonPackageAsSource)' == 'true'">
         <PackageId>MiniBson.Source</PackageId>
+        <Description>A minimal, trimmable, AOT-compatible BSON reader/writer library (source-only package). Includes source generator for automatic serialization.</Description>
         <DevelopmentDependency>true</DevelopmentDependency>
         <IncludeBuildOutput>false</IncludeBuildOutput>
         <SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>
