@@ -14,7 +14,7 @@
     <!-- NuGet Package Properties -->
     <PropertyGroup>
         <PackageId>MiniBson</PackageId>
-        <Version>1.1.0</Version>
+        <Version>1.1.1</Version>
         <Authors>maxkatz6</Authors>
         <Description>A minimal, trimmable, AOT-compatible BSON reader/writer library without reflection. Includes source generator for automatic serialization.</Description>
         <PackageTags>bson;mongodb;serialization;aot;trimming;source-generator</PackageTags>
@@ -63,6 +63,7 @@
         <Content Include="$(MSBuildProjectDirectory)\*.cs" Exclude="$(MSBuildProjectDirectory)\obj\**">
             <Pack>true</Pack>
             <PackagePath>contentFiles\cs\any\MiniBson\</PackagePath>
+            <BuildAction>Compile</BuildAction>
         </Content>
         <!-- Props files (same for build and buildTransitive) -->
         <Content Include="build/MiniBson.Source.props">
