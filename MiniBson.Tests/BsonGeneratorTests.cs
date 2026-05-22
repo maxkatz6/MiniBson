@@ -147,6 +147,18 @@ public sealed class BsonGeneratorTests
 {
     private readonly TestBsonContext _context = new();
 
+    private void Serialize(object input, Stream output)
+    {
+        using var writer = new BsonWriter(output, leaveOpen: true);
+        _context.Serialize(input, writer);
+    }
+
+    private object? Deserialize(Stream input, Type type)
+    {
+        using var reader = new BsonReader(input, leaveOpen: true);
+        return _context.Deserialize(reader, type);
+    }
+
     [TestMethod]
     public void SerializeAndDeserializeSimpleType()
     {
@@ -158,10 +170,10 @@ public sealed class BsonGeneratorTests
         };
 
         using var ms = new MemoryStream();
-        _context.Serialize(original, ms);
+        Serialize(original, ms);
 
         ms.Position = 0;
-        var result = (SimpleType?)_context.Deserialize(ms, typeof(SimpleType));
+        var result = (SimpleType?)Deserialize(ms, typeof(SimpleType));
 
         Assert.IsNotNull(result);
         Assert.AreEqual(original.Name, result.Name);
@@ -180,10 +192,10 @@ public sealed class BsonGeneratorTests
         };
 
         using var ms = new MemoryStream();
-        _context.Serialize(original, ms);
+        Serialize(original, ms);
 
         ms.Position = 0;
-        var result = (TypeWithNullables?)_context.Deserialize(ms, typeof(TypeWithNullables));
+        var result = (TypeWithNullables?)Deserialize(ms, typeof(TypeWithNullables));
 
         Assert.IsNotNull(result);
         Assert.AreEqual(original.NullableString, result.NullableString);
@@ -202,10 +214,10 @@ public sealed class BsonGeneratorTests
         };
 
         using var ms = new MemoryStream();
-        _context.Serialize(original, ms);
+        Serialize(original, ms);
 
         ms.Position = 0;
-        var result = (TypeWithNullables?)_context.Deserialize(ms, typeof(TypeWithNullables));
+        var result = (TypeWithNullables?)Deserialize(ms, typeof(TypeWithNullables));
 
         Assert.IsNotNull(result);
         Assert.IsNull(result.NullableString);
@@ -223,10 +235,10 @@ public sealed class BsonGeneratorTests
         };
 
         using var ms = new MemoryStream();
-        _context.Serialize(original, ms);
+        Serialize(original, ms);
 
         ms.Position = 0;
-        var result = (TypeWithArrays?)_context.Deserialize(ms, typeof(TypeWithArrays));
+        var result = (TypeWithArrays?)Deserialize(ms, typeof(TypeWithArrays));
 
         Assert.IsNotNull(result);
         CollectionAssert.AreEqual(original.Numbers, result.Numbers);
@@ -248,10 +260,10 @@ public sealed class BsonGeneratorTests
         };
 
         using var ms = new MemoryStream();
-        _context.Serialize(original, ms);
+        Serialize(original, ms);
 
         ms.Position = 0;
-        var result = (NestedType?)_context.Deserialize(ms, typeof(NestedType));
+        var result = (NestedType?)Deserialize(ms, typeof(NestedType));
 
         Assert.IsNotNull(result);
         Assert.AreEqual(original.Title, result.Title);
@@ -271,10 +283,10 @@ public sealed class BsonGeneratorTests
         };
 
         using var ms = new MemoryStream();
-        _context.Serialize(original, ms);
+        Serialize(original, ms);
 
         ms.Position = 0;
-        var result = (NestedType?)_context.Deserialize(ms, typeof(NestedType));
+        var result = (NestedType?)Deserialize(ms, typeof(NestedType));
 
         Assert.IsNotNull(result);
         Assert.AreEqual(original.Title, result.Title);
@@ -303,10 +315,10 @@ public sealed class BsonGeneratorTests
         };
 
         using var ms = new MemoryStream();
-        _context.Serialize(original, ms);
+        Serialize(original, ms);
 
         ms.Position = 0;
-        var result = (ComplexType?)_context.Deserialize(ms, typeof(ComplexType));
+        var result = (ComplexType?)Deserialize(ms, typeof(ComplexType));
 
         Assert.IsNotNull(result);
         Assert.AreEqual(original.Id, result.Id);
@@ -332,10 +344,10 @@ public sealed class BsonGeneratorTests
         };
 
         using var ms = new MemoryStream();
-        _context.Serialize(original, ms);
+        Serialize(original, ms);
 
         ms.Position = 0;
-        var result = (TypeWithArrays?)_context.Deserialize(ms, typeof(TypeWithArrays));
+        var result = (TypeWithArrays?)Deserialize(ms, typeof(TypeWithArrays));
 
         Assert.IsNotNull(result);
         Assert.AreEqual(0, result.Numbers.Length);
@@ -347,7 +359,7 @@ public sealed class BsonGeneratorTests
     public void SerializeUnsupportedTypeThrows()
     {
         using var ms = new MemoryStream();
-        _context.Serialize("unsupported string", ms);
+        Serialize("unsupported string", ms);
     }
 
     [TestMethod]
@@ -363,7 +375,7 @@ public sealed class BsonGeneratorTests
         }
         ms.Position = 0;
 
-        _context.Deserialize(ms, typeof(string));
+        Deserialize(ms, typeof(string));
     }
 
     [TestMethod]
@@ -376,10 +388,10 @@ public sealed class BsonGeneratorTests
         };
 
         using var ms = new MemoryStream();
-        _context.Serialize(original, ms);
+        Serialize(original, ms);
 
         ms.Position = 0;
-        var result = (TypeWithBinaryData?)_context.Deserialize(ms, typeof(TypeWithBinaryData));
+        var result = (TypeWithBinaryData?)Deserialize(ms, typeof(TypeWithBinaryData));
 
         Assert.IsNotNull(result);
         Assert.AreEqual(original.Name, result.Name);
@@ -396,10 +408,10 @@ public sealed class BsonGeneratorTests
         };
 
         using var ms = new MemoryStream();
-        _context.Serialize(original, ms);
+        Serialize(original, ms);
 
         ms.Position = 0;
-        var result = (TypeWithBinaryData?)_context.Deserialize(ms, typeof(TypeWithBinaryData));
+        var result = (TypeWithBinaryData?)Deserialize(ms, typeof(TypeWithBinaryData));
 
         Assert.IsNotNull(result);
         Assert.AreEqual(original.Name, result.Name);
@@ -417,10 +429,10 @@ public sealed class BsonGeneratorTests
         };
 
         using var ms = new MemoryStream();
-        _context.Serialize(original, ms);
+        Serialize(original, ms);
 
         ms.Position = 0;
-        var result = (TypeWithBinaryData?)_context.Deserialize(ms, typeof(TypeWithBinaryData));
+        var result = (TypeWithBinaryData?)Deserialize(ms, typeof(TypeWithBinaryData));
 
         Assert.IsNotNull(result);
         Assert.IsNotNull(result.NullableData);
@@ -438,10 +450,10 @@ public sealed class BsonGeneratorTests
         };
 
         using var ms = new MemoryStream();
-        _context.Serialize(original, ms);
+        Serialize(original, ms);
 
         ms.Position = 0;
-        var result = (TypeWithBinaryData?)_context.Deserialize(ms, typeof(TypeWithBinaryData));
+        var result = (TypeWithBinaryData?)Deserialize(ms, typeof(TypeWithBinaryData));
 
         Assert.IsNotNull(result);
         Assert.IsNull(result.NullableData);
@@ -460,10 +472,10 @@ public sealed class BsonGeneratorTests
         };
 
         using var ms = new MemoryStream();
-        _context.Serialize(original, ms);
+        Serialize(original, ms);
 
         ms.Position = 0;
-        var result = (TypeWithBinaryData?)_context.Deserialize(ms, typeof(TypeWithBinaryData));
+        var result = (TypeWithBinaryData?)Deserialize(ms, typeof(TypeWithBinaryData));
 
         Assert.IsNotNull(result);
         CollectionAssert.AreEqual(original.Data, result.Data);
@@ -479,10 +491,10 @@ public sealed class BsonGeneratorTests
         };
 
         using var ms = new MemoryStream();
-        _context.Serialize(original, ms);
+        Serialize(original, ms);
 
         ms.Position = 0;
-        var result = (TypeWithReadOnlyMemoryBinary?)_context.Deserialize(ms, typeof(TypeWithReadOnlyMemoryBinary));
+        var result = (TypeWithReadOnlyMemoryBinary?)Deserialize(ms, typeof(TypeWithReadOnlyMemoryBinary));
 
         Assert.IsNotNull(result);
         Assert.AreEqual(original.Name, result.Name);
@@ -499,10 +511,10 @@ public sealed class BsonGeneratorTests
         };
 
         using var ms = new MemoryStream();
-        _context.Serialize(original, ms);
+        Serialize(original, ms);
 
         ms.Position = 0;
-        var result = (TypeWithReadOnlyMemoryBinary?)_context.Deserialize(ms, typeof(TypeWithReadOnlyMemoryBinary));
+        var result = (TypeWithReadOnlyMemoryBinary?)Deserialize(ms, typeof(TypeWithReadOnlyMemoryBinary));
 
         Assert.IsNotNull(result);
         Assert.AreEqual(original.Name, result.Name);
@@ -520,10 +532,10 @@ public sealed class BsonGeneratorTests
         };
 
         using var ms = new MemoryStream();
-        _context.Serialize(original, ms);
+        Serialize(original, ms);
 
         ms.Position = 0;
-        var result = (TypeWithReadOnlyMemoryBinary?)_context.Deserialize(ms, typeof(TypeWithReadOnlyMemoryBinary));
+        var result = (TypeWithReadOnlyMemoryBinary?)Deserialize(ms, typeof(TypeWithReadOnlyMemoryBinary));
 
         Assert.IsNotNull(result);
         Assert.IsTrue(result.NullableData.HasValue);
@@ -541,10 +553,10 @@ public sealed class BsonGeneratorTests
         };
 
         using var ms = new MemoryStream();
-        _context.Serialize(original, ms);
+        Serialize(original, ms);
 
         ms.Position = 0;
-        var result = (TypeWithReadOnlyMemoryBinary?)_context.Deserialize(ms, typeof(TypeWithReadOnlyMemoryBinary));
+        var result = (TypeWithReadOnlyMemoryBinary?)Deserialize(ms, typeof(TypeWithReadOnlyMemoryBinary));
 
         Assert.IsNotNull(result);
         Assert.IsFalse(result.NullableData.HasValue);
@@ -561,10 +573,10 @@ public sealed class BsonGeneratorTests
         };
 
         using var ms = new MemoryStream();
-        _context.Serialize(original, ms);
+        Serialize(original, ms);
 
         ms.Position = 0;
-        var result = (TypeWithEnums?)_context.Deserialize(ms, typeof(TypeWithEnums));
+        var result = (TypeWithEnums?)Deserialize(ms, typeof(TypeWithEnums));
 
         Assert.IsNotNull(result);
         Assert.AreEqual(original.Status, result.Status);
@@ -583,10 +595,10 @@ public sealed class BsonGeneratorTests
         };
 
         using var ms = new MemoryStream();
-        _context.Serialize(original, ms);
+        Serialize(original, ms);
 
         ms.Position = 0;
-        var result = (TypeWithEnums?)_context.Deserialize(ms, typeof(TypeWithEnums));
+        var result = (TypeWithEnums?)Deserialize(ms, typeof(TypeWithEnums));
 
         Assert.IsNotNull(result);
         Assert.AreEqual(original.Status, result.Status);
@@ -604,10 +616,10 @@ public sealed class BsonGeneratorTests
         };
 
         using var ms = new MemoryStream();
-        _context.Serialize(original, ms);
+        Serialize(original, ms);
 
         ms.Position = 0;
-        var result = (TypeWithEnumArrays?)_context.Deserialize(ms, typeof(TypeWithEnumArrays));
+        var result = (TypeWithEnumArrays?)Deserialize(ms, typeof(TypeWithEnumArrays));
 
         Assert.IsNotNull(result);
         CollectionAssert.AreEqual(original.Statuses, result.Statuses);
@@ -624,10 +636,10 @@ public sealed class BsonGeneratorTests
         };
 
         using var ms = new MemoryStream();
-        _context.Serialize(original, ms);
+        Serialize(original, ms);
 
         ms.Position = 0;
-        var result = (TypeWithEnumArrays?)_context.Deserialize(ms, typeof(TypeWithEnumArrays));
+        var result = (TypeWithEnumArrays?)Deserialize(ms, typeof(TypeWithEnumArrays));
 
         Assert.IsNotNull(result);
         Assert.AreEqual(0, result.Statuses.Length);
@@ -644,10 +656,10 @@ public sealed class BsonGeneratorTests
         };
 
         using var ms = new MemoryStream();
-        _context.Serialize(original, ms);
+        Serialize(original, ms);
 
         ms.Position = 0;
-        var result = (TypeWithLargeEnum?)_context.Deserialize(ms, typeof(TypeWithLargeEnum));
+        var result = (TypeWithLargeEnum?)Deserialize(ms, typeof(TypeWithLargeEnum));
 
         Assert.IsNotNull(result);
         Assert.AreEqual(original.Value, result.Value);
@@ -665,7 +677,7 @@ public sealed class BsonGeneratorTests
         };
 
         using var ms = new MemoryStream();
-        _context.Serialize(original, ms);
+        Serialize(original, ms);
 
         // Read back with raw BsonReader to verify it's stored as int
         ms.Position = 0;
@@ -697,7 +709,7 @@ public sealed class BsonGeneratorTests
         };
 
         using var ms = new MemoryStream();
-        _context.Serialize(original, ms);
+        Serialize(original, ms);
 
         // Read back with raw BsonReader to verify it's stored as int64
         ms.Position = 0;
@@ -720,10 +732,10 @@ public sealed class BsonGeneratorTests
         };
 
         using var ms = new MemoryStream();
-        _context.Serialize(original, ms);
+        Serialize(original, ms);
 
         ms.Position = 0;
-        var result = (Type1?)_context.Deserialize(ms, typeof(Type1));
+        var result = (Type1?)Deserialize(ms, typeof(Type1));
 
         Assert.IsNotNull(result);
         Assert.AreEqual(original.Name, result.Name);
@@ -740,10 +752,10 @@ public sealed class BsonGeneratorTests
         };
 
         using var ms = new MemoryStream();
-        _context.Serialize(original, ms);
+        Serialize(original, ms);
 
         ms.Position = 0;
-        var result = (Type2?)_context.Deserialize(ms, typeof(Type2));
+        var result = (Type2?)Deserialize(ms, typeof(Type2));
 
         Assert.IsNotNull(result);
         Assert.AreEqual(original.Name, result.Name);
@@ -762,10 +774,10 @@ public sealed class BsonGeneratorTests
         };
 
         using var ms = new MemoryStream();
-        _context.Serialize(original, ms);
+        Serialize(original, ms);
 
         ms.Position = 0;
-        var result = (Type3?)_context.Deserialize(ms, typeof(Type3));
+        var result = (Type3?)Deserialize(ms, typeof(Type3));
 
         Assert.IsNotNull(result);
         Assert.AreEqual(original.Name, result.Name);
@@ -786,7 +798,7 @@ public sealed class BsonGeneratorTests
         };
 
         using var ms = new MemoryStream();
-        _context.Serialize(original, ms);
+        Serialize(original, ms);
 
         // Verify with raw reader that all 4 properties are serialized
         ms.Position = 0;
@@ -813,10 +825,10 @@ public sealed class BsonGeneratorTests
         var original = new SimpleRecord("RecordName", 42);
 
         using var ms = new MemoryStream();
-        _context.Serialize(original, ms);
+        Serialize(original, ms);
 
         ms.Position = 0;
-        var result = (SimpleRecord?)_context.Deserialize(ms, typeof(SimpleRecord));
+        var result = (SimpleRecord?)Deserialize(ms, typeof(SimpleRecord));
 
         Assert.IsNotNull(result);
         Assert.AreEqual(original.Name, result.Name);
@@ -829,7 +841,7 @@ public sealed class BsonGeneratorTests
         var original = new SimpleRecord("Test", 100);
 
         using var ms = new MemoryStream();
-        _context.Serialize(original, ms);
+        Serialize(original, ms);
 
         // Verify BSON structure with raw reader
         ms.Position = 0;
@@ -856,10 +868,10 @@ public sealed class BsonGeneratorTests
         var original = new RecordWithNullables("NotNull", 123);
 
         using var ms = new MemoryStream();
-        _context.Serialize(original, ms);
+        Serialize(original, ms);
 
         ms.Position = 0;
-        var result = (RecordWithNullables?)_context.Deserialize(ms, typeof(RecordWithNullables));
+        var result = (RecordWithNullables?)Deserialize(ms, typeof(RecordWithNullables));
 
         Assert.IsNotNull(result);
         Assert.AreEqual(original.NullableName, result.NullableName);
@@ -872,10 +884,10 @@ public sealed class BsonGeneratorTests
         var original = new RecordWithNullables(null, null);
 
         using var ms = new MemoryStream();
-        _context.Serialize(original, ms);
+        Serialize(original, ms);
 
         ms.Position = 0;
-        var result = (RecordWithNullables?)_context.Deserialize(ms, typeof(RecordWithNullables));
+        var result = (RecordWithNullables?)Deserialize(ms, typeof(RecordWithNullables));
 
         Assert.IsNotNull(result);
         Assert.IsNull(result.NullableName);
@@ -888,7 +900,7 @@ public sealed class BsonGeneratorTests
         var original = new RecordWithNullables("Present", null);
 
         using var ms = new MemoryStream();
-        _context.Serialize(original, ms);
+        Serialize(original, ms);
 
         // Verify BSON structure
         ms.Position = 0;
@@ -914,10 +926,10 @@ public sealed class BsonGeneratorTests
         var original = new RecordWithArray(new[] { 1, 2, 3 }, new[] { "a", "b", "c" });
 
         using var ms = new MemoryStream();
-        _context.Serialize(original, ms);
+        Serialize(original, ms);
 
         ms.Position = 0;
-        var result = (RecordWithArray?)_context.Deserialize(ms, typeof(RecordWithArray));
+        var result = (RecordWithArray?)Deserialize(ms, typeof(RecordWithArray));
 
         Assert.IsNotNull(result);
         CollectionAssert.AreEqual(original.Numbers, result.Numbers);
@@ -930,7 +942,7 @@ public sealed class BsonGeneratorTests
         var original = new RecordWithArray(new[] { 10, 20 }, new[] { "x", "y" });
 
         using var ms = new MemoryStream();
-        _context.Serialize(original, ms);
+        Serialize(original, ms);
 
         // Verify BSON structure
         ms.Position = 0;
@@ -971,10 +983,10 @@ public sealed class BsonGeneratorTests
         var original = new NestedRecord("Parent", new SimpleRecord("Child", 999));
 
         using var ms = new MemoryStream();
-        _context.Serialize(original, ms);
+        Serialize(original, ms);
 
         ms.Position = 0;
-        var result = (NestedRecord?)_context.Deserialize(ms, typeof(NestedRecord));
+        var result = (NestedRecord?)Deserialize(ms, typeof(NestedRecord));
 
         Assert.IsNotNull(result);
         Assert.AreEqual(original.Title, result.Title);
@@ -989,10 +1001,10 @@ public sealed class BsonGeneratorTests
         var original = new NestedRecord("Lonely", null);
 
         using var ms = new MemoryStream();
-        _context.Serialize(original, ms);
+        Serialize(original, ms);
 
         ms.Position = 0;
-        var result = (NestedRecord?)_context.Deserialize(ms, typeof(NestedRecord));
+        var result = (NestedRecord?)Deserialize(ms, typeof(NestedRecord));
 
         Assert.IsNotNull(result);
         Assert.AreEqual(original.Title, result.Title);
@@ -1005,7 +1017,7 @@ public sealed class BsonGeneratorTests
         var original = new NestedRecord("Outer", new SimpleRecord("Inner", 50));
 
         using var ms = new MemoryStream();
-        _context.Serialize(original, ms);
+        Serialize(original, ms);
 
         // Verify BSON structure
         ms.Position = 0;
@@ -1043,10 +1055,10 @@ public sealed class BsonGeneratorTests
         var original = new SimpleRecord("Original", 1);
 
         using var ms = new MemoryStream();
-        _context.Serialize(original, ms);
+        Serialize(original, ms);
 
         ms.Position = 0;
-        var result = (SimpleRecord?)_context.Deserialize(ms, typeof(SimpleRecord));
+        var result = (SimpleRecord?)Deserialize(ms, typeof(SimpleRecord));
 
         Assert.IsNotNull(result);
         // Records use value equality

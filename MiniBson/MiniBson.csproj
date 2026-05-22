@@ -14,7 +14,7 @@
     <!-- NuGet Package Properties -->
     <PropertyGroup>
         <PackageId>MiniBson</PackageId>
-        <Version>1.1.1</Version>
+        <Version>1.1.2</Version>
         <Authors>maxkatz6</Authors>
         <Description>A minimal, trimmable, AOT-compatible BSON reader/writer library without reflection. Includes source generator for automatic serialization.</Description>
         <PackageTags>bson;mongodb;serialization;aot;trimming;source-generator</PackageTags>

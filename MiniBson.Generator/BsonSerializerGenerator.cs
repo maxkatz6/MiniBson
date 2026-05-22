@@ -765,9 +765,8 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         sb.AppendLine("    /// <summary>");
         sb.AppendLine("    /// Serializes the specified object to BSON format.");
         sb.AppendLine("    /// </summary>");
-        sb.AppendLine("    public void Serialize(object input, Stream output)");
+        sb.AppendLine("    public void Serialize(object input, BsonWriter writer)");
         sb.AppendLine("    {");
-        sb.AppendLine("        using var writer = new BsonWriter(output, leaveOpen: true);");
         sb.AppendLine("        var inputType = input.GetType();");
 
         var first = true;
@@ -775,7 +774,7 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         {
             var typeName = type.FullyQualifiedName;
             var methodName = GetSafeMethodName(type);
-            
+
             if (first)
             {
                 sb.AppendLine($"        if (inputType == typeof({typeName}))");
@@ -785,7 +784,7 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
             {
                 sb.AppendLine($"        else if (inputType == typeof({typeName}))");
             }
-            
+
             sb.AppendLine($"            Write{methodName}(writer, ({typeName})input);");
         }
 
@@ -799,9 +798,8 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         sb.AppendLine("    /// <summary>");
         sb.AppendLine("    /// Deserializes BSON data to an object of the specified type.");
         sb.AppendLine("    /// </summary>");
-        sb.AppendLine("    public object? Deserialize(Stream input, Type type)");
+        sb.AppendLine("    public object? Deserialize(BsonReader reader, Type type)");
         sb.AppendLine("    {");
-        sb.AppendLine("        using var reader = new BsonReader(input, leaveOpen: true);");
 
         var first = true;
         foreach (var type in types)
