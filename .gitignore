@@ -6,3 +6,5 @@ riderModule.iml
 .DS_Store
 artifacts
 .idea
+*.DotSettings.user
+.claude/settings.local.json
