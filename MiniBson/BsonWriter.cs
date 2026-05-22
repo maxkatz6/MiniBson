@@ -381,16 +381,35 @@ internal sealed class BsonWriter(Stream stream, bool leaveOpen = false) : IDispo
 
     private void WriteCString(string value)
     {
+#if NET6_0_OR_GREATER
+        var byteCount = Encoding.UTF8.GetByteCount(value);
+        Span<byte> buffer = byteCount <= 256
+            ? stackalloc byte[byteCount]
+            : new byte[byteCount];
+        var written = Encoding.UTF8.GetBytes(value, buffer);
+        _writer.Write(buffer.Slice(0, written));
+#else
         var bytes = Encoding.UTF8.GetBytes(value);
         _writer.Write(bytes);
+#endif
         _writer.Write((byte)0);
     }
 
     private void WriteStringValue(string value)
     {
+#if NET6_0_OR_GREATER
+        var byteCount = Encoding.UTF8.GetByteCount(value);
+        _writer.Write(byteCount + 1); // length includes null terminator
+        Span<byte> buffer = byteCount <= 256
+            ? stackalloc byte[byteCount]
+            : new byte[byteCount];
+        var written = Encoding.UTF8.GetBytes(value, buffer);
+        _writer.Write(buffer.Slice(0, written));
+#else
         var bytes = Encoding.UTF8.GetBytes(value);
-        _writer.Write(bytes.Length + 1); // Length includes null terminator
+        _writer.Write(bytes.Length + 1); // length includes null terminator
         _writer.Write(bytes);
+#endif
         _writer.Write((byte)0);
     }
 

@@ -195,10 +195,7 @@ internal sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDispo
     public string ReadString()
     {
         EnsureType(BsonType.String, BsonType.JavaScript, BsonType.Symbol);
-        var length = _reader.ReadInt32();
-        var bytes = _reader.ReadBytes(length - 1);
-        _reader.ReadByte(); // null terminator
-        return Encoding.UTF8.GetString(bytes);
+        return ReadLengthPrefixedString();
     }
 
     /// <summary>
@@ -228,7 +225,15 @@ internal sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDispo
         EnsureType(BsonType.ObjectId);
         if (destination.Length < 12)
             throw new ArgumentException("Destination must be at least 12 bytes.", nameof(destination));
-        
+
+        if (_sourceBuffer is not null)
+        {
+            var start = _sourceOffset + (int)_stream.Position;
+            new ReadOnlySpan<byte>(_sourceBuffer, start, 12).CopyTo(destination);
+            _stream.Position += 12;
+            return;
+        }
+
         var bytes = _reader.ReadBytes(12);
         bytes.CopyTo(destination);
     }
@@ -310,7 +315,25 @@ internal sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDispo
     public string ReadJavaScript()
     {
         EnsureType(BsonType.JavaScript);
-        var length = _reader.ReadInt32();
+        return ReadLengthPrefixedString();
+    }
+
+    private string ReadLengthPrefixedString()
+    {
+        var length = _reader.ReadInt32(); // includes null terminator
+        if (_sourceBuffer is not null)
+        {
+            var start = _sourceOffset + (int)_stream.Position;
+            var valueSpan = new ReadOnlySpan<byte>(_sourceBuffer, start, length - 1);
+#if NET6_0_OR_GREATER
+            var result = Encoding.UTF8.GetString(valueSpan);
+#else
+            var result = Encoding.UTF8.GetString(valueSpan.ToArray());
+#endif
+            _stream.Position += length; // skip value + null terminator
+            return result;
+        }
+
         var bytes = _reader.ReadBytes(length - 1);
         _reader.ReadByte(); // null terminator
         return Encoding.UTF8.GetString(bytes);
@@ -461,6 +484,24 @@ internal sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDispo
 
     private string ReadCString()
     {
+        if (_sourceBuffer is not null)
+        {
+            var start = _sourceOffset + (int)_stream.Position;
+            var span = new ReadOnlySpan<byte>(_sourceBuffer, start, _sourceBuffer.Length - start);
+            var nullIdx = span.IndexOf((byte)0);
+            if (nullIdx < 0)
+                throw new InvalidDataException("Unterminated cstring.");
+
+            var valueSpan = span.Slice(0, nullIdx);
+#if NET6_0_OR_GREATER
+            var result = Encoding.UTF8.GetString(valueSpan);
+#else
+            var result = Encoding.UTF8.GetString(valueSpan.ToArray());
+#endif
+            _stream.Position += nullIdx + 1; // skip past null terminator
+            return result;
+        }
+
         var bytes = new List<byte>();
         byte b;
         while ((b = _reader.ReadByte()) != 0)
@@ -470,18 +511,22 @@ internal sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDispo
         return Encoding.UTF8.GetString(bytes.ToArray());
     }
 
-    private void EnsureType(params BsonType[] expectedTypes)
+    private void EnsureType(BsonType expected)
     {
-        foreach (var expected in expectedTypes)
-        {
-            if (CurrentType == expected)
-                return;
-        }
-        
-        if (expectedTypes.Length == 1)
-            throw new InvalidOperationException($"Expected {expectedTypes[0]}, but current type is {CurrentType}.");
-        else
-            throw new InvalidOperationException($"Expected one of [{string.Join(", ", expectedTypes)}], but current type is {CurrentType}.");
+        if (CurrentType != expected)
+            throw new InvalidOperationException($"Expected {expected}, but current type is {CurrentType}.");
+    }
+
+    private void EnsureType(BsonType expected1, BsonType expected2)
+    {
+        if (CurrentType != expected1 && CurrentType != expected2)
+            throw new InvalidOperationException($"Expected one of [{expected1}, {expected2}], but current type is {CurrentType}.");
+    }
+
+    private void EnsureType(BsonType expected1, BsonType expected2, BsonType expected3)
+    {
+        if (CurrentType != expected1 && CurrentType != expected2 && CurrentType != expected3)
+            throw new InvalidOperationException($"Expected one of [{expected1}, {expected2}, {expected3}], but current type is {CurrentType}.");
     }
 
     private static readonly DateTime UnixEpoch = new(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
