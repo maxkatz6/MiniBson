@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text;
 
 namespace MiniBson;
@@ -20,19 +21,44 @@ internal sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDispo
     private readonly Stream _stream = stream ?? throw new ArgumentNullException(nameof(stream));
     private readonly BinaryReader _reader = new(stream, Encoding.UTF8, leaveOpen: true);
     private readonly Stack<DocumentContext> _contextStack = new();
-    
+
+    // When the input is backed by a byte[], we keep a direct reference so binary
+    // reads can return a ReadOnlyMemory<byte> slice without copying.
+    private readonly byte[]? _sourceBuffer;
+    private readonly int _sourceOffset;
+
     private struct DocumentContext
     {
         public long EndPosition;
         public bool IsArray;
     }
 
-    public BsonReader(byte[] data) : this(new MemoryStream(data), leaveOpen: false)
+    public BsonReader(byte[] data) : this(new MemoryStream(data, writable: false), leaveOpen: false)
     {
+        _sourceBuffer = data ?? throw new ArgumentNullException(nameof(data));
+        _sourceOffset = 0;
     }
 
-    public BsonReader(ReadOnlyMemory<byte> data) : this(new MemoryStream(data.ToArray()), leaveOpen: false)
+    public BsonReader(ReadOnlyMemory<byte> data)
+        : this(CreateMemoryStream(data, out var buffer, out var offset), leaveOpen: false)
     {
+        _sourceBuffer = buffer;
+        _sourceOffset = offset;
+    }
+
+    private static MemoryStream CreateMemoryStream(ReadOnlyMemory<byte> data, out byte[] buffer, out int offset)
+    {
+        if (MemoryMarshal.TryGetArray(data, out ArraySegment<byte> segment) && segment.Array is not null)
+        {
+            buffer = segment.Array;
+            offset = segment.Offset;
+            return new MemoryStream(segment.Array, segment.Offset, segment.Count, writable: false);
+        }
+
+        var copy = data.ToArray();
+        buffer = copy;
+        offset = 0;
+        return new MemoryStream(copy, 0, copy.Length, writable: false);
     }
 
     /// <summary>
@@ -215,15 +241,45 @@ internal sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDispo
         EnsureType(BsonType.Binary);
         var length = _reader.ReadInt32();
         var subType = (BsonBinarySubType)_reader.ReadByte();
-        
+
         // Handle old binary subtype that has an extra length prefix
         if (subType == BsonBinarySubType.BinaryOld)
         {
             var innerLength = _reader.ReadInt32();
             return (_reader.ReadBytes(innerLength), subType);
         }
-        
+
         return (_reader.ReadBytes(length), subType);
+    }
+
+    /// <summary>
+    /// Reads binary data as a <see cref="ReadOnlyMemory{T}"/>.
+    /// When the reader was constructed from a <see cref="byte"/> array or array-backed
+    /// <see cref="ReadOnlyMemory{T}"/>, the returned memory is a slice into the source
+    /// buffer (no allocation). For stream-based input the data is copied into a new array.
+    /// The returned memory aliases the source buffer; mutations to the source are visible.
+    /// </summary>
+    public (ReadOnlyMemory<byte> Data, BsonBinarySubType SubType) ReadBinaryAsMemory()
+    {
+        EnsureType(BsonType.Binary);
+        var length = _reader.ReadInt32();
+        var subType = (BsonBinarySubType)_reader.ReadByte();
+
+        var dataLength = length;
+        if (subType == BsonBinarySubType.BinaryOld)
+        {
+            dataLength = _reader.ReadInt32();
+        }
+
+        if (_sourceBuffer is not null)
+        {
+            var startInBuffer = _sourceOffset + (int)_stream.Position;
+            var slice = new ReadOnlyMemory<byte>(_sourceBuffer, startInBuffer, dataLength);
+            _stream.Position += dataLength;
+            return (slice, subType);
+        }
+
+        return (_reader.ReadBytes(dataLength), subType);
     }
 
     /// <summary>

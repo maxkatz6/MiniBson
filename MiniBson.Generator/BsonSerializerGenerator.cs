@@ -591,7 +591,7 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         // Handle ReadOnlyMemory<byte> as binary data
         else if (underlyingType.FullyQualifiedName == ReadOnlyByteMemoryFullName)
         {
-            sb.AppendLine($"{indent}    _{name} = new global::System.ReadOnlyMemory<byte>(reader.ReadBinary().Data);");
+            sb.AppendLine($"{indent}    _{name} = reader.ReadBinaryAsMemory().Data;");
         }
         else if (type.ArrayElementType is { } arrayElementType)
         {

@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using MiniBson;
 
 namespace MiniBson.Tests;
@@ -174,6 +175,91 @@ public sealed class BsonWriterReaderTests
         CollectionAssert.AreEqual(testBinary, data);
         
         Assert.IsFalse(reader.Read());
+        reader.ReadEndDocument();
+    }
+
+    [TestMethod]
+    public void ReadBinaryAsMemory_FromByteArray_SlicesIntoSource()
+    {
+        var testBinary = new byte[] { 0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE };
+        byte[] bsonData;
+
+        using (var ms = new MemoryStream())
+        {
+            using var writer = new BsonWriter(ms);
+            writer.WriteStartDocument();
+            writer.WriteBinary("bin", testBinary);
+            writer.WriteEndDocument();
+            bsonData = ms.ToArray();
+        }
+
+        using var reader = new BsonReader(bsonData);
+        reader.ReadStartDocument();
+        Assert.IsTrue(reader.Read());
+
+        var (data, _) = reader.ReadBinaryAsMemory();
+
+        CollectionAssert.AreEqual(testBinary, data.ToArray());
+        Assert.IsTrue(MemoryMarshal.TryGetArray(data, out var segment));
+        Assert.AreSame(bsonData, segment.Array, "Binary memory should alias the source byte[] (zero-copy).");
+
+        reader.ReadEndDocument();
+    }
+
+    [TestMethod]
+    public void ReadBinaryAsMemory_FromReadOnlyMemory_SlicesIntoSource()
+    {
+        var testBinary = new byte[] { 1, 2, 3, 4, 5 };
+        byte[] bsonData;
+
+        using (var ms = new MemoryStream())
+        {
+            using var writer = new BsonWriter(ms);
+            writer.WriteStartDocument();
+            writer.WriteBinary("bin", testBinary);
+            writer.WriteEndDocument();
+            bsonData = ms.ToArray();
+        }
+
+        // Wrap with an offset to verify the offset is respected.
+        var padded = new byte[bsonData.Length + 8];
+        Buffer.BlockCopy(bsonData, 0, padded, 4, bsonData.Length);
+        var input = new ReadOnlyMemory<byte>(padded, 4, bsonData.Length);
+
+        using var reader = new BsonReader(input);
+        reader.ReadStartDocument();
+        Assert.IsTrue(reader.Read());
+
+        var (data, _) = reader.ReadBinaryAsMemory();
+
+        CollectionAssert.AreEqual(testBinary, data.ToArray());
+        Assert.IsTrue(MemoryMarshal.TryGetArray(data, out var segment));
+        Assert.AreSame(padded, segment.Array, "Binary memory should alias the padded source array.");
+
+        reader.ReadEndDocument();
+    }
+
+    [TestMethod]
+    public void ReadBinaryAsMemory_FromStream_AllocatesCopy()
+    {
+        var testBinary = new byte[] { 0x11, 0x22, 0x33 };
+
+        using var ms = new MemoryStream();
+        using (var writer = new BsonWriter(ms, leaveOpen: true))
+        {
+            writer.WriteStartDocument();
+            writer.WriteBinary("bin", testBinary);
+            writer.WriteEndDocument();
+        }
+
+        ms.Position = 0;
+        using var reader = new BsonReader(ms);
+        reader.ReadStartDocument();
+        Assert.IsTrue(reader.Read());
+
+        var (data, _) = reader.ReadBinaryAsMemory();
+        CollectionAssert.AreEqual(testBinary, data.ToArray());
+
         reader.ReadEndDocument();
     }
 
