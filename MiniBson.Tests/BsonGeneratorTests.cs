@@ -1,4 +1,3 @@
-using Metsys.Bson;
 using MiniBson;
 
 namespace MiniBson.Tests;
@@ -45,6 +44,13 @@ public class TypeWithBinaryData
     public byte[] Data { get; set; } = [];
     public string Name { get; set; } = string.Empty;
     public byte[]? NullableData { get; set; }
+}
+
+public class TypeWithReadOnlyMemoryBinary
+{
+    public ReadOnlyMemory<byte> Data { get; set; }
+    public string Name { get; set; } = string.Empty;
+    public ReadOnlyMemory<byte>? NullableData { get; set; }
 }
 
 // Enum types for testing
@@ -123,6 +129,7 @@ public record NestedRecord(string Title, SimpleRecord? Inner);
 [BsonSerializable(typeof(NestedType))]
 [BsonSerializable(typeof(ComplexType))]
 [BsonSerializable(typeof(TypeWithBinaryData))]
+[BsonSerializable(typeof(TypeWithReadOnlyMemoryBinary))]
 [BsonSerializable(typeof(TypeWithEnums))]
 [BsonSerializable(typeof(TypeWithEnumArrays))]
 [BsonSerializable(typeof(TypeWithLargeEnum))]
@@ -460,6 +467,87 @@ public sealed class BsonGeneratorTests
 
         Assert.IsNotNull(result);
         CollectionAssert.AreEqual(original.Data, result.Data);
+    }
+
+    [TestMethod]
+    public void SerializeAndDeserializeReadOnlyMemoryBinary()
+    {
+        var original = new TypeWithReadOnlyMemoryBinary
+        {
+            Data = new byte[] { 0x01, 0x02, 0x03, 0x04, 0x05, 0xAA, 0xBB, 0xCC },
+            Name = "MemoryBinaryTest"
+        };
+
+        using var ms = new MemoryStream();
+        _context.Serialize(original, ms);
+
+        ms.Position = 0;
+        var result = (TypeWithReadOnlyMemoryBinary?)_context.Deserialize(ms, typeof(TypeWithReadOnlyMemoryBinary));
+
+        Assert.IsNotNull(result);
+        Assert.AreEqual(original.Name, result.Name);
+        CollectionAssert.AreEqual(original.Data.ToArray(), result.Data.ToArray());
+    }
+
+    [TestMethod]
+    public void SerializeAndDeserializeReadOnlyMemoryBinary_Empty()
+    {
+        var original = new TypeWithReadOnlyMemoryBinary
+        {
+            Data = ReadOnlyMemory<byte>.Empty,
+            Name = "EmptyMemory"
+        };
+
+        using var ms = new MemoryStream();
+        _context.Serialize(original, ms);
+
+        ms.Position = 0;
+        var result = (TypeWithReadOnlyMemoryBinary?)_context.Deserialize(ms, typeof(TypeWithReadOnlyMemoryBinary));
+
+        Assert.IsNotNull(result);
+        Assert.AreEqual(original.Name, result.Name);
+        Assert.AreEqual(0, result.Data.Length);
+    }
+
+    [TestMethod]
+    public void SerializeAndDeserializeReadOnlyMemoryBinary_NullableWithValue()
+    {
+        var original = new TypeWithReadOnlyMemoryBinary
+        {
+            Data = new byte[] { 0xFF },
+            Name = "NullableMemoryTest",
+            NullableData = new byte[] { 0xDE, 0xAD, 0xBE, 0xEF }
+        };
+
+        using var ms = new MemoryStream();
+        _context.Serialize(original, ms);
+
+        ms.Position = 0;
+        var result = (TypeWithReadOnlyMemoryBinary?)_context.Deserialize(ms, typeof(TypeWithReadOnlyMemoryBinary));
+
+        Assert.IsNotNull(result);
+        Assert.IsTrue(result.NullableData.HasValue);
+        CollectionAssert.AreEqual(original.NullableData!.Value.ToArray(), result.NullableData.Value.ToArray());
+    }
+
+    [TestMethod]
+    public void SerializeAndDeserializeReadOnlyMemoryBinary_NullableWithNull()
+    {
+        var original = new TypeWithReadOnlyMemoryBinary
+        {
+            Data = new byte[] { 0x01 },
+            Name = "NullableNullMemoryTest",
+            NullableData = null
+        };
+
+        using var ms = new MemoryStream();
+        _context.Serialize(original, ms);
+
+        ms.Position = 0;
+        var result = (TypeWithReadOnlyMemoryBinary?)_context.Deserialize(ms, typeof(TypeWithReadOnlyMemoryBinary));
+
+        Assert.IsNotNull(result);
+        Assert.IsFalse(result.NullableData.HasValue);
     }
 
     [TestMethod]

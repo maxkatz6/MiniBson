@@ -183,6 +183,8 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         }
     }
 
+    private const string ReadOnlyByteMemoryFullName = "global::System.ReadOnlyMemory<byte>";
+
     private static bool IsPrimitiveType(ITypeSymbol type)
     {
         // Enums are treated as primitives (mapped to their underlying type)
@@ -205,6 +207,7 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
             SpecialType.System_String => true,
             SpecialType.System_DateTime => true,
             _ => type.ToDisplayString() == "System.Guid"
+                || type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) == ReadOnlyByteMemoryFullName
         };
     }
 
@@ -264,6 +267,13 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         if (type.ArrayElementType is { SpecialType: SpecialType.System_Byte })
         {
             sb.AppendLine($"{indent}writer.WriteBinary(\"{name}\", {accessor});");
+            return;
+        }
+
+        // Handle ReadOnlyMemory<byte> as binary data
+        if (type.FullyQualifiedName == ReadOnlyByteMemoryFullName)
+        {
+            sb.AppendLine($"{indent}writer.WriteBinary(\"{name}\", {accessor}.Span);");
             return;
         }
 
@@ -577,6 +587,11 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         if (type.ArrayElementType is { SpecialType: SpecialType.System_Byte })
         {
             sb.AppendLine($"{indent}    _{name} = reader.ReadBinary().Data;");
+        }
+        // Handle ReadOnlyMemory<byte> as binary data
+        else if (underlyingType.FullyQualifiedName == ReadOnlyByteMemoryFullName)
+        {
+            sb.AppendLine($"{indent}    _{name} = new global::System.ReadOnlyMemory<byte>(reader.ReadBinary().Data);");
         }
         else if (type.ArrayElementType is { } arrayElementType)
         {
