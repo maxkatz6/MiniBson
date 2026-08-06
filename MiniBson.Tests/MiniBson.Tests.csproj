@@ -1,19 +1,19 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
     <PropertyGroup>
-        <TargetFramework>net9.0</TargetFramework>
+        <TargetFramework>net10.0</TargetFramework>
         <LangVersion>latest</LangVersion>
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
         <EmitCompilerGeneratedFiles>true</EmitCompilerGeneratedFiles>
+        <OutputType>exe</OutputType>
     </PropertyGroup>
 
     <ItemGroup>
-        <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0"/>
-        <PackageReference Include="MSTest" Version="3.6.4"/>
+        <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.8.1"/>
+        <PackageReference Include="MSTest" Version="4.3.3"/>
         <PackageReference Include="Newtonsoft.Json.Bson" Version="1.0.3"/>
-        <!-- Drives the generator in-process so MINIBSON001 can be asserted directly -->
-        <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.8.0"/>
+        <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="5.6.0"/>
     </ItemGroup>
 
     <ItemGroup>

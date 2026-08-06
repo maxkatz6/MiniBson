@@ -355,15 +355,13 @@ public sealed class BsonGeneratorTests
     }
 
     [TestMethod]
-    [ExpectedException(typeof(NotSupportedException))]
     public void SerializeUnsupportedTypeThrows()
     {
         using var ms = new MemoryStream();
-        Serialize("unsupported string", ms);
+        Assert.Throws<NotSupportedException>(() => Serialize("unsupported string", ms));
     }
 
     [TestMethod]
-    [ExpectedException(typeof(NotSupportedException))]
     public void DeserializeUnsupportedTypeThrows()
     {
         using var ms = new MemoryStream();
@@ -375,7 +373,7 @@ public sealed class BsonGeneratorTests
         }
         ms.Position = 0;
 
-        Deserialize(ms, typeof(string));
+        Assert.Throws<NotSupportedException>(() => Deserialize(ms, typeof(string)));
     }
 
     [TestMethod]
