@@ -224,6 +224,10 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
 
         // Generate public Deserialize method
         GenerateDeserializeMethod(sb, contextClass.SerializableTypes);
+        sb.AppendLine();
+
+        // Generate public GetSerializedSize method
+        GenerateGetSerializedSizeMethod(sb, contextClass.SerializableTypes);
 
         // Runtime backstop for anything MINIBSON001 was reported for
         if (diagnostics.HasAny)
@@ -1044,6 +1048,39 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         sb.AppendLine("        => throw new NotSupportedException(");
         sb.AppendLine("            $\"MiniBson cannot serialize '{member}': type '{type}' is not supported \" +");
         sb.AppendLine("            \"by the source generator (MINIBSON001).\");");
+    }
+
+    private static void GenerateGetSerializedSizeMethod(StringBuilder sb, EquatableList<TypeInfo> types)
+    {
+        sb.AppendLine("    /// <summary>");
+        sb.AppendLine("    /// Returns the exact number of bytes <see cref=\"Serialize\"/> would write for this value.");
+        sb.AppendLine("    /// </summary>");
+        sb.AppendLine("    /// <remarks>");
+        sb.AppendLine("    /// Exact rather than approximate, provided every property returns the same value when read");
+        sb.AppendLine("    /// twice. This is the same size the writer computes for itself when the destination cannot");
+        sb.AppendLine("    /// be seeked.");
+        sb.AppendLine("    /// </remarks>");
+        sb.AppendLine("    public int GetSerializedSize(object input)");
+        sb.AppendLine("    {");
+        sb.AppendLine("        var inputType = input.GetType();");
+
+        var firstSize = true;
+        foreach (var type in types)
+        {
+            var typeName = type.FullyQualifiedName;
+            var methodName = GetSafeMethodName(type);
+
+            sb.AppendLine(firstSize
+                ? $"        if (inputType == typeof({typeName}))"
+                : $"        else if (inputType == typeof({typeName}))");
+            firstSize = false;
+
+            sb.AppendLine($"            return {SizeType}.DocumentOverhead + Measure{methodName}Inner(({typeName})input);");
+        }
+
+        sb.AppendLine("        else");
+        sb.AppendLine("            throw new NotSupportedException($\"Type {input.GetType()} is not supported for serialization.\");");
+        sb.AppendLine("    }");
     }
 
     private static void GenerateSerializeMethod(StringBuilder sb, EquatableList<TypeInfo> types)

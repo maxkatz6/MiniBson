@@ -160,6 +160,8 @@ public sealed class BsonGeneratorTests
     {
         // Routed through DualPathWriter so every test here also checks measure against write.
         var bytes = DualPathWriter.Serialize(writer => _context.Serialize(input, writer));
+        Assert.AreEqual(bytes.Length, _context.GetSerializedSize(input),
+            "GetSerializedSize disagrees with the bytes actually written.");
         output.Write(bytes, 0, bytes.Length);
     }
 

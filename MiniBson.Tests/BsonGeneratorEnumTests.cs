@@ -107,8 +107,13 @@ public sealed class BsonGeneratorEnumTests
 {
     private readonly EnumBsonContext _context = new();
 
-    private byte[] Serialize(object input) =>
-        DualPathWriter.Serialize(writer => _context.Serialize(input, writer));
+    private byte[] Serialize(object input)
+    {
+        var bytes = DualPathWriter.Serialize(writer => _context.Serialize(input, writer));
+        Assert.AreEqual(bytes.Length, _context.GetSerializedSize(input),
+            "GetSerializedSize disagrees with the bytes actually written.");
+        return bytes;
+    }
 
     private T? Deserialize<T>(byte[] data)
     {

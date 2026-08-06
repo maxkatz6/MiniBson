@@ -79,6 +79,8 @@ The generator emits a `Measure{T}Inner` beside each `Write{T}Inner`, plus a `Mea
 
 Nested documents are measured on demand at each write site rather than memoized, which is O(N·depth). That is free for flat models and acceptable at typical nesting, but it does repeat work on deeply self-referencing graphs. A pre-order size cursor filled by the measure pass and consumed by the write pass would make it O(N); generated code is internal, so that can be retrofitted without an API change.
 
+`GetSerializedSize` on the generated context is the same measurement exposed publicly, so it costs nothing beyond the dispatch. There is deliberately no reader-side counterpart: a reader already knows its document's length once it has read the prefix, and no use case has come up that the caller could not serve by reading that prefix itself.
+
 Measure and write are two independent walks of the same object graph, so they can disagree. When they do, `WriteEndDocument` throws instead of emitting a malformed document. `DualPathWriter` routes every generator test through both framing paths and compares bytes, which is what catches divergence — a mismatch is invisible on a `MemoryStream`.
 
 ## Type classification
@@ -161,6 +163,7 @@ The test suite is organized by responsibility:
 | `BsonGeneratorTests.cs` | End-to-end generated serialization for objects, records, inheritance, nullability, and arrays |
 | `BsonGeneratorPrimitiveTests.cs` | Scalar, nullable scalar, and scalar-array mappings |
 | `BsonGeneratorEnumTests.cs` | Enum underlying types, nullable enums, arrays, and nested enums |
+| `BsonGeneratorSizeTests.cs` | Generated `GetSerializedSize` against the bytes actually written |
 | `BsonGeneratorDiagnosticTests.cs` | Direct Roslyn assertions for `MINIBSON001` and valid generator output |
 | `MetsysCrossTests.cs` | Byte-level compatibility assertions derived from Metsys.Bson |
 | `NewtonsoftBsonCrossTests.cs` | Read and write interoperability with `Newtonsoft.Json.Bson` |

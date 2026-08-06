@@ -72,8 +72,13 @@ public sealed class BsonGeneratorPrimitiveTests
 {
     private readonly PrimitiveBsonContext _context = new();
 
-    private byte[] Serialize(object input) =>
-        DualPathWriter.Serialize(writer => _context.Serialize(input, writer));
+    private byte[] Serialize(object input)
+    {
+        var bytes = DualPathWriter.Serialize(writer => _context.Serialize(input, writer));
+        Assert.AreEqual(bytes.Length, _context.GetSerializedSize(input),
+            "GetSerializedSize disagrees with the bytes actually written.");
+        return bytes;
+    }
 
     private T? RoundTrip<T>(T input) where T : notnull
     {

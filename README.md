@@ -80,7 +80,27 @@ Each context exposes:
 ```csharp
 void Serialize(object input, BsonWriter writer);
 object? Deserialize(BsonReader reader, Type type);
+int GetSerializedSize(object input);
 ```
+
+`GetSerializedSize` returns the exact byte count `Serialize` would write, without writing
+anything. Use it to pre-allocate a buffer, to length-prefix a message before sending it, or
+to reject a value that exceeds a size limit before paying to encode it:
+
+```csharp
+var size = context.GetSerializedSize(person);
+if (size > MaxMessageBytes)
+    throw new InvalidOperationException($"{size} bytes exceeds the limit.");
+
+WriteFrameHeader(socket, size);
+using var writer = new BsonWriter(socket, leaveOpen: true);
+context.Serialize(person, writer);
+```
+
+It is exact, not an estimate — it is the same number the writer computes for itself when the
+destination cannot be seeked, and the writer throws if the two disagree. That holds as long
+as properties return the same value when read twice; see
+[Streaming over non-seekable streams](#streaming-over-non-seekable-streams).
 
 ### Model behavior
 
