@@ -1,4 +1,5 @@
-using System;
+﻿using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -21,6 +22,16 @@ internal sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDispo
     private readonly Stream _stream = stream ?? throw new ArgumentNullException(nameof(stream));
     private readonly BinaryReader _reader = new(stream, Encoding.UTF8, leaveOpen: true);
     private readonly Stack<DocumentContext> _contextStack = new();
+
+    private readonly bool _canSeek = stream.CanSeek;
+
+    // Bytes consumed so far. Used instead of Stream.Position, which a non-seekable stream
+    // cannot report. Document ends are tracked against it.
+    private long _position;
+
+    // Rented on the first skip over a non-seekable stream, where bytes have to be read and
+    // thrown away rather than seeked past.
+    private byte[]? _discardBuffer;
 
     // When the input is backed by a byte[], we keep a direct reference so binary
     // reads can return a ReadOnlyMemory<byte> slice without copying.
@@ -81,8 +92,8 @@ internal sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDispo
     /// </summary>
     public void ReadStartDocument()
     {
-        var length = _reader.ReadInt32();
-        var endPosition = _stream.Position + length - 4; // -4 because length includes itself
+        var length = ReadInt32Core();
+        var endPosition = _position + length - 4; // -4 because length includes itself
         _contextStack.Push(new DocumentContext { EndPosition = endPosition, IsArray = false });
     }
 
@@ -97,10 +108,9 @@ internal sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDispo
         var context = _contextStack.Pop();
         
         // Skip to end position if not already there (handles skipped fields)
-        if (_stream.Position < context.EndPosition - 1)
-            _stream.Position = context.EndPosition - 1;
+        Advance(context.EndPosition - 1 - _position);
         
-        var endMarker = _reader.ReadByte();
+        var endMarker = ReadByteCore();
         if (endMarker != 0)
             throw new InvalidDataException($"Expected end of document marker (0x00), got 0x{endMarker:X2}");
     }
@@ -116,14 +126,14 @@ internal sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDispo
         var context = _contextStack.Peek();
         
         // Check if we're at the end of document
-        if (_stream.Position >= context.EndPosition - 1)
+        if (_position >= context.EndPosition - 1)
         {
             CurrentType = default;
             CurrentName = string.Empty;
             return false;
         }
 
-        CurrentType = (BsonType)_reader.ReadByte();
+        CurrentType = (BsonType)ReadByteCore();
         
         if (CurrentType == 0) // End of document marker
         {
@@ -141,7 +151,7 @@ internal sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDispo
     public bool ReadBoolean()
     {
         EnsureType(BsonType.Boolean);
-        return _reader.ReadByte() != 0;
+        return ReadByteCore() != 0;
     }
 
     /// <summary>
@@ -152,9 +162,9 @@ internal sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDispo
         EnsureType(BsonType.Int32, BsonType.Int64, BsonType.Double);
         return CurrentType switch
         {
-            BsonType.Int32 => _reader.ReadInt32(),
-            BsonType.Int64 => (int)_reader.ReadInt64(),
-            BsonType.Double => (int)_reader.ReadDouble(),
+            BsonType.Int32 => ReadInt32Core(),
+            BsonType.Int64 => (int)ReadInt64Core(),
+            BsonType.Double => (int)ReadDoubleCore(),
             _ => throw new InvalidOperationException()
         };
     }
@@ -167,9 +177,9 @@ internal sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDispo
         EnsureType(BsonType.Int64, BsonType.Int32, BsonType.Double);
         return CurrentType switch
         {
-            BsonType.Int64 => _reader.ReadInt64(),
-            BsonType.Int32 => _reader.ReadInt32(),
-            BsonType.Double => (long)_reader.ReadDouble(),
+            BsonType.Int64 => ReadInt64Core(),
+            BsonType.Int32 => ReadInt32Core(),
+            BsonType.Double => (long)ReadDoubleCore(),
             _ => throw new InvalidOperationException()
         };
     }
@@ -182,9 +192,9 @@ internal sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDispo
         EnsureType(BsonType.Double, BsonType.Int32, BsonType.Int64);
         return CurrentType switch
         {
-            BsonType.Double => _reader.ReadDouble(),
-            BsonType.Int32 => _reader.ReadInt32(),
-            BsonType.Int64 => _reader.ReadInt64(),
+            BsonType.Double => ReadDoubleCore(),
+            BsonType.Int32 => ReadInt32Core(),
+            BsonType.Int64 => ReadInt64Core(),
             _ => throw new InvalidOperationException()
         };
     }
@@ -204,7 +214,7 @@ internal sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDispo
     public DateTime ReadDateTime()
     {
         EnsureType(BsonType.DateTime);
-        var milliseconds = _reader.ReadInt64();
+        var milliseconds = ReadInt64Core();
         return UnixEpoch.AddMilliseconds(milliseconds);
     }
 
@@ -214,7 +224,7 @@ internal sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDispo
     public byte[] ReadObjectId()
     {
         EnsureType(BsonType.ObjectId);
-        return _reader.ReadBytes(12);
+        return ReadBytesCore(12);
     }
 
     /// <summary>
@@ -228,14 +238,13 @@ internal sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDispo
 
         if (_sourceBuffer is not null)
         {
-            var start = _sourceOffset + (int)_stream.Position;
+            var start = _sourceOffset + (int)_position;
             new ReadOnlySpan<byte>(_sourceBuffer, start, 12).CopyTo(destination);
-            _stream.Position += 12;
+            Advance(12);
             return;
         }
 
-        var bytes = _reader.ReadBytes(12);
-        bytes.CopyTo(destination);
+        ReadBytesCore(12).CopyTo(destination);
     }
 
     /// <summary>
@@ -244,17 +253,17 @@ internal sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDispo
     public (byte[] Data, BsonBinarySubType SubType) ReadBinary()
     {
         EnsureType(BsonType.Binary);
-        var length = _reader.ReadInt32();
-        var subType = (BsonBinarySubType)_reader.ReadByte();
+        var length = ReadInt32Core();
+        var subType = (BsonBinarySubType)ReadByteCore();
 
         // Handle old binary subtype that has an extra length prefix
         if (subType == BsonBinarySubType.BinaryOld)
         {
-            var innerLength = _reader.ReadInt32();
-            return (_reader.ReadBytes(innerLength), subType);
+            var innerLength = ReadInt32Core();
+            return (ReadBytesCore(innerLength), subType);
         }
 
-        return (_reader.ReadBytes(length), subType);
+        return (ReadBytesCore(length), subType);
     }
 
     /// <summary>
@@ -267,24 +276,24 @@ internal sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDispo
     public (ReadOnlyMemory<byte> Data, BsonBinarySubType SubType) ReadBinaryAsMemory()
     {
         EnsureType(BsonType.Binary);
-        var length = _reader.ReadInt32();
-        var subType = (BsonBinarySubType)_reader.ReadByte();
+        var length = ReadInt32Core();
+        var subType = (BsonBinarySubType)ReadByteCore();
 
         var dataLength = length;
         if (subType == BsonBinarySubType.BinaryOld)
         {
-            dataLength = _reader.ReadInt32();
+            dataLength = ReadInt32Core();
         }
 
         if (_sourceBuffer is not null)
         {
-            var startInBuffer = _sourceOffset + (int)_stream.Position;
+            var startInBuffer = _sourceOffset + (int)_position;
             var slice = new ReadOnlyMemory<byte>(_sourceBuffer, startInBuffer, dataLength);
-            _stream.Position += dataLength;
+            Advance(dataLength);
             return (slice, subType);
         }
 
-        return (_reader.ReadBytes(dataLength), subType);
+        return (ReadBytesCore(dataLength), subType);
     }
 
     /// <summary>
@@ -320,22 +329,22 @@ internal sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDispo
 
     private string ReadLengthPrefixedString()
     {
-        var length = _reader.ReadInt32(); // includes null terminator
+        var length = ReadInt32Core(); // includes null terminator
         if (_sourceBuffer is not null)
         {
-            var start = _sourceOffset + (int)_stream.Position;
+            var start = _sourceOffset + (int)_position;
             var valueSpan = new ReadOnlySpan<byte>(_sourceBuffer, start, length - 1);
 #if NET6_0_OR_GREATER
             var result = Encoding.UTF8.GetString(valueSpan);
 #else
             var result = Encoding.UTF8.GetString(valueSpan.ToArray());
 #endif
-            _stream.Position += length; // skip value + null terminator
+            Advance(length); // skip value + null terminator
             return result;
         }
 
-        var bytes = _reader.ReadBytes(length - 1);
-        _reader.ReadByte(); // null terminator
+        var bytes = ReadBytesCore(length - 1);
+        ReadByteCore(); // null terminator
         return Encoding.UTF8.GetString(bytes);
     }
 
@@ -345,8 +354,8 @@ internal sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDispo
     public (uint Increment, uint Timestamp) ReadTimestamp()
     {
         EnsureType(BsonType.Timestamp);
-        var increment = _reader.ReadUInt32();
-        var timestamp = _reader.ReadUInt32();
+        var increment = ReadUInt32Core();
+        var timestamp = ReadUInt32Core();
         return (increment, timestamp);
     }
 
@@ -356,8 +365,8 @@ internal sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDispo
     public void ReadStartNestedDocument()
     {
         EnsureType(BsonType.Document);
-        var length = _reader.ReadInt32();
-        var endPosition = _stream.Position + length - 4;
+        var length = ReadInt32Core();
+        var endPosition = _position + length - 4;
         _contextStack.Push(new DocumentContext { EndPosition = endPosition, IsArray = false });
     }
 
@@ -367,8 +376,8 @@ internal sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDispo
     public void ReadStartArray()
     {
         EnsureType(BsonType.Array);
-        var length = _reader.ReadInt32();
-        var endPosition = _stream.Position + length - 4;
+        var length = ReadInt32Core();
+        var endPosition = _position + length - 4;
         _contextStack.Push(new DocumentContext { EndPosition = endPosition, IsArray = true });
     }
 
@@ -383,28 +392,28 @@ internal sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDispo
             case BsonType.DateTime:
             case BsonType.Timestamp:
             case BsonType.Int64:
-                _stream.Position += 8;
+                Advance(8);
                 break;
             case BsonType.String:
             case BsonType.JavaScript:
             case BsonType.Symbol:
-                var stringLength = _reader.ReadInt32();
-                _stream.Position += stringLength;
+                var stringLength = ReadInt32Core();
+                Advance(stringLength);
                 break;
             case BsonType.Document:
             case BsonType.Array:
-                var docLength = _reader.ReadInt32();
-                _stream.Position += docLength - 4;
+                var docLength = ReadInt32Core();
+                Advance(docLength - 4);
                 break;
             case BsonType.Binary:
-                var binLength = _reader.ReadInt32();
-                _stream.Position += 1 + binLength; // subtype + data
+                var binLength = ReadInt32Core();
+                Advance(1 + binLength); // subtype + data
                 break;
             case BsonType.ObjectId:
-                _stream.Position += 12;
+                Advance(12);
                 break;
             case BsonType.Boolean:
-                _stream.Position += 1;
+                Advance(1);
                 break;
             case BsonType.Null:
             case BsonType.Undefined:
@@ -417,14 +426,14 @@ internal sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDispo
                 ReadCString(); // options
                 break;
             case BsonType.Int32:
-                _stream.Position += 4;
+                Advance(4);
                 break;
             case BsonType.JavaScriptWithScope:
-                var scopeLength = _reader.ReadInt32();
-                _stream.Position += scopeLength - 4;
+                var scopeLength = ReadInt32Core();
+                Advance(scopeLength - 4);
                 break;
             case BsonType.Decimal128:
-                _stream.Position += 16;
+                Advance(16);
                 break;
             default:
                 throw new InvalidDataException($"Unknown BSON type: {CurrentType}");
@@ -486,7 +495,7 @@ internal sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDispo
     {
         if (_sourceBuffer is not null)
         {
-            var start = _sourceOffset + (int)_stream.Position;
+            var start = _sourceOffset + (int)_position;
             var span = new ReadOnlySpan<byte>(_sourceBuffer, start, _sourceBuffer.Length - start);
             var nullIdx = span.IndexOf((byte)0);
             if (nullIdx < 0)
@@ -498,17 +507,11 @@ internal sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDispo
 #else
             var result = Encoding.UTF8.GetString(valueSpan.ToArray());
 #endif
-            _stream.Position += nullIdx + 1; // skip past null terminator
+            Advance(nullIdx + 1); // skip past null terminator
             return result;
         }
 
-        var bytes = new List<byte>();
-        byte b;
-        while ((b = _reader.ReadByte()) != 0)
-        {
-            bytes.Add(b);
-        }
-        return Encoding.UTF8.GetString(bytes.ToArray());
+        return ReadCStringFromStream();
     }
 
     private void EnsureType(BsonType expected)
@@ -531,8 +534,123 @@ internal sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDispo
 
     private static readonly DateTime UnixEpoch = new(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
 
+    // Read primitives. Everything this reader consumes goes through one of these so the
+    // logical position stays accurate without asking the stream where it is.
+
+    private byte ReadByteCore()
+    {
+        _position += 1;
+        return _reader.ReadByte();
+    }
+
+    private int ReadInt32Core()
+    {
+        _position += 4;
+        return _reader.ReadInt32();
+    }
+
+    private uint ReadUInt32Core()
+    {
+        _position += 4;
+        return _reader.ReadUInt32();
+    }
+
+    private long ReadInt64Core()
+    {
+        _position += 8;
+        return _reader.ReadInt64();
+    }
+
+    private double ReadDoubleCore()
+    {
+        _position += 8;
+        return _reader.ReadDouble();
+    }
+
+    private byte[] ReadBytesCore(int count)
+    {
+        var bytes = _reader.ReadBytes(count);
+        _position += bytes.Length;
+
+        // BinaryReader returns a short array at end of stream rather than throwing, which
+        // would otherwise surface as a silently wrong value.
+        if (bytes.Length != count)
+            throw new EndOfStreamException($"Expected {count} bytes but the input ended after {bytes.Length}.");
+
+        return bytes;
+    }
+
+    /// <summary>
+    /// Moves forward over <paramref name="count"/> bytes without reading them into anything
+    /// the caller sees.
+    /// </summary>
+    private void Advance(long count)
+    {
+        if (count <= 0)
+            return;
+
+        if (_canSeek)
+        {
+            _stream.Position += count;
+            _position += count;
+            return;
+        }
+
+        // Nothing to seek with, so the bytes have to be consumed and dropped.
+        _discardBuffer ??= ArrayPool<byte>.Shared.Rent(4096);
+
+        while (count > 0)
+        {
+            var chunk = (int)Math.Min(count, _discardBuffer.Length);
+            var read = _stream.Read(_discardBuffer, 0, chunk);
+            if (read <= 0)
+                throw new EndOfStreamException($"Expected {count} more bytes but the input ended.");
+
+            _position += read;
+            count -= read;
+        }
+    }
+
+    /// <summary>
+    /// Reads a cstring one byte at a time. A non-seekable stream cannot be rewound, so the
+    /// terminator cannot be found by scanning ahead.
+    /// </summary>
+    private string ReadCStringFromStream()
+    {
+        var scratch = ArrayPool<byte>.Shared.Rent(128);
+        try
+        {
+            var length = 0;
+            byte b;
+            while ((b = ReadByteCore()) != 0)
+            {
+                if (length == scratch.Length)
+                {
+                    var larger = ArrayPool<byte>.Shared.Rent(scratch.Length * 2);
+                    Buffer.BlockCopy(scratch, 0, larger, 0, length);
+                    ArrayPool<byte>.Shared.Return(scratch);
+                    scratch = larger;
+                }
+
+                scratch[length++] = b;
+            }
+
+            return Encoding.UTF8.GetString(scratch, 0, length);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(scratch);
+        }
+    }
+
     public void Dispose()
     {
+        if (_discardBuffer is { } discard)
+        {
+            _discardBuffer = null;
+            ArrayPool<byte>.Shared.Return(discard);
+        }
+
         _reader.Dispose();
         if (!leaveOpen)
             _stream.Dispose();

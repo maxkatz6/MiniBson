@@ -1,17 +1,22 @@
-﻿namespace MiniBson.Tests;
+namespace MiniBson.Tests;
 
 /// <summary>
-/// A write-only stream that refuses to seek or report its position, standing in for a socket or
-/// pipe. Reaching for <see cref="Stream.Position"/> or <see cref="Stream.Seek"/> fails loudly
-/// rather than quietly working because the test used a <see cref="MemoryStream"/>.
+/// A stream that refuses to seek or report its position, standing in for a socket or pipe.
+/// Reaching for <see cref="Stream.Position"/> or <see cref="Stream.Seek"/> fails loudly rather
+/// than quietly working because the test used a <see cref="MemoryStream"/>.
 /// </summary>
-internal sealed class NonSeekableStream(Stream inner) : Stream
+/// <remarks>
+/// <paramref name="chunkSize"/> caps how much a single <see cref="Read"/> returns. Real network
+/// streams hand back short reads, and code that assumes one call fills the request is a common
+/// way to get this wrong.
+/// </remarks>
+internal sealed class NonSeekableStream(Stream inner, int chunkSize = int.MaxValue) : Stream
 {
-    public override bool CanRead => false;
+    public override bool CanRead => inner.CanRead;
 
     public override bool CanSeek => false;
 
-    public override bool CanWrite => true;
+    public override bool CanWrite => inner.CanWrite;
 
     public override long Length => throw new NotSupportedException("Length is not available.");
 
@@ -24,7 +29,7 @@ internal sealed class NonSeekableStream(Stream inner) : Stream
     public override void Flush() => inner.Flush();
 
     public override int Read(byte[] buffer, int offset, int count) =>
-        throw new NotSupportedException("Reading is not supported.");
+        inner.Read(buffer, offset, Math.Min(count, chunkSize));
 
     public override long Seek(long offset, SeekOrigin origin) =>
         throw new NotSupportedException("Seeking is not supported.");

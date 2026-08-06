@@ -165,8 +165,25 @@ public sealed class BsonGeneratorTests
 
     private object? Deserialize(Stream input, Type type)
     {
-        using var reader = new BsonReader(input, leaveOpen: true);
-        return _context.Deserialize(reader, type);
+        // Routed through DualPathReader so every test here also covers deserializing from a
+        // stream that cannot seek, where skipping consumes bytes instead of jumping over them.
+        var document = DualPathReader.Drain(input);
+        var (seekable, streamed) = DualPathReader.Read(document, r => _context.Deserialize(r, type));
+
+        if (seekable is null || streamed is null)
+        {
+            Assert.AreEqual(seekable, streamed, "Deserializing without seeking produced a different value.");
+            return seekable;
+        }
+
+        // These models are mostly classes without value equality, so compare what they encode
+        // back to rather than the instances themselves.
+        CollectionAssert.AreEqual(
+            DualPathWriter.Serialize(w => _context.Serialize(seekable, w)),
+            DualPathWriter.Serialize(w => _context.Serialize(streamed, w)),
+            "Deserializing without seeking produced a different value.");
+
+        return seekable;
     }
 
     [TestMethod]

@@ -1,4 +1,4 @@
-# MiniBson
+﻿# MiniBson
 
 MiniBson is a small BSON library for .NET. It combines a forward-only reader and writer with source-generated serialization, without using runtime reflection. The runtime library is designed for trimming and Native AOT.
 
@@ -90,12 +90,13 @@ object? Deserialize(BsonReader reader, Type type);
 - Deserialization matches fields by name. Unknown fields are skipped, and missing fields retain their default values.
 - Enums are stored by numeric value. Renaming a member is safe; changing its value changes the wire format.
 
-### Streaming to non-seekable destinations
+### Streaming over non-seekable streams
 
-Generated serializers work over any stream, including ones that cannot be seeked. When the
-destination cannot be seeked, generated code computes each document's length before writing
-it, so nothing has to be patched afterwards. Over a seekable stream it skips that work and
-lets `BsonWriter` patch lengths in, which is cheaper.
+Generated contexts serialize and deserialize over any stream, including ones that cannot be
+seeked. When the destination cannot be seeked, generated code computes each document's
+length before writing it, so nothing has to be patched afterwards. Over a seekable stream it
+skips that work and lets `BsonWriter` patch lengths in, which is cheaper. Deserialization
+needs no such branch: `BsonReader` never seeks backwards.
 
 This costs nothing to use, but it does add one requirement on models: **a property must
 return the same value when read twice**. Computing the size and writing the value are
@@ -264,8 +265,10 @@ needs lengths supplied.
 Generated serializers handle all of this themselves — see
 [Streaming to non-seekable destinations](#streaming-to-non-seekable-destinations).
 
-`BsonReader` still requires a seekable stream, because skipping values relies on changing
-the stream position. Readers built from `byte[]` or `ReadOnlyMemory<byte>` are unaffected.
+`BsonReader` works over any stream. It tracks its own position rather than asking the
+stream, and skipping a value consumes those bytes when the stream cannot seek. A reader
+consumes exactly its document and no more, so a stream holding several documents in
+sequence can be read one at a time.
 
 ### Buffering
 

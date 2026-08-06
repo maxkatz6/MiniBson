@@ -1,4 +1,4 @@
-# Developing MiniBson
+﻿# Developing MiniBson
 
 This document covers the repository itself. For installation and usage, see [README.md](README.md).
 
@@ -50,7 +50,15 @@ BSON documents begin with their total length, which is unknown until the documen
 
 Because option 3 is absent, the low-level API on a non-seekable stream must supply lengths; opening a document without one throws.
 
-`BsonReader` still changes position when skipping values, so stream-backed readers remain seekable-only. Buffer-backed readers are unaffected.
+### Reading without seeking
+
+`BsonReader` needs two things from a position: knowing where the current document ends, and moving forward over skipped values. Neither requires seeking.
+
+It maintains `_position` itself — a count of bytes consumed — and every read goes through a `*Core` wrapper that keeps it accurate. `Advance` handles forward movement: it seeks when the stream can, and otherwise reads into a pooled discard buffer and throws the bytes away. Keeping the seek path matters because generated deserializers skip every unknown field, and a large skipped value would otherwise be copied rather than jumped over.
+
+The reader consumes exactly its document and never reads ahead, so a stream can hold several documents in sequence. That constraint is why `ReadCString` reads one byte at a time on the stream path (`ReadCStringFromStream`): finding the terminator by scanning would need lookahead the reader cannot give back.
+
+Buffered reading — a pooled read window like the one `BsonWriter` uses — was considered and deferred. It is a bigger problem than the writer's: values can span refills, values can exceed the window, and the window has to be bounded by the root document's length or it eats bytes belonging to whatever follows. It is a perf change rather than a correctness one, and keeping it separate kept the non-seekable work reviewable.
 
 ### Writer buffering
 
@@ -149,6 +157,7 @@ The test suite is organized by responsibility:
 | `BsonSizeTests.cs` | Every `BsonSize` helper checked against bytes the writer emitted |
 | `BsonWriterBufferingTests.cs` | Staging-buffer boundaries, oversized payloads, and back-patching after a flush |
 | `BsonWriterKnownLengthTests.cs` | Caller-supplied lengths, non-seekable streams, and the length-mismatch check |
+| `BsonReaderNonSeekableTests.cs` | Reading and skipping without seeking, short reads, and exact document consumption |
 | `BsonGeneratorTests.cs` | End-to-end generated serialization for objects, records, inheritance, nullability, and arrays |
 | `BsonGeneratorPrimitiveTests.cs` | Scalar, nullable scalar, and scalar-array mappings |
 | `BsonGeneratorEnumTests.cs` | Enum underlying types, nullable enums, arrays, and nested enums |
@@ -156,7 +165,11 @@ The test suite is organized by responsibility:
 | `MetsysCrossTests.cs` | Byte-level compatibility assertions derived from Metsys.Bson |
 | `NewtonsoftBsonCrossTests.cs` | Read and write interoperability with `Newtonsoft.Json.Bson` |
 
-`NonSeekableStream.cs` and `DualPathWriter.cs` are shared helpers rather than test classes. `DualPathWriter` serializes twice — patched and precomputed — and asserts the results are byte-identical; the three generator suites route through it, so every model they cover validates both framing paths.
+`NonSeekableStream.cs`, `DualPathWriter.cs`, and `DualPathReader.cs` are shared helpers rather than test classes.
+
+`NonSeekableStream` refuses to seek or report a position in either direction, and its `chunkSize` caps how much a single `Read` returns — real network streams hand back short reads, and assuming one call fills the request is an easy way to get this wrong.
+
+`DualPathWriter` serializes twice — patched and precomputed — and asserts the results are byte-identical. `DualPathReader` deserializes twice, seekable and not, and `BsonGeneratorTests` compares the two by re-encoding them, since most test models are classes without value equality. The generator suites route through both, so every model they cover validates all four paths.
 
 When changing the wire representation, add a byte-level assertion. A round-trip test is insufficient because matching reader and writer bugs can still round-trip successfully. The same applies to sizes: only a byte count catches a wrong one.
 
