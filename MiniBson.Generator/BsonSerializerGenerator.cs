@@ -15,6 +15,72 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
 {
     private const string BsonSerializableAttributeFullName = "MiniBson.BsonSerializableAttribute";
 
+    private static readonly DiagnosticDescriptor UnsupportedType = new(
+        id: "MINIBSON001",
+        title: "Type is not supported by the MiniBson generator",
+        messageFormat: "MiniBson cannot serialize '{0}': {1}",
+        category: "MiniBson",
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true,
+        description: "The generator has no read/write mapping for this type, so it would silently " +
+                     "round-trip as an empty value. Change the property type, or exclude it from the " +
+                     "serialized model.");
+
+    /// <summary>
+    /// A member the emitters could not produce code for.
+    /// </summary>
+    private sealed record UnsupportedMember(string MemberPath, string Reason, LocationInfo? Location);
+
+    /// <summary>
+    /// Collects unsupported members for one generated context class. Write and read
+    /// emitters both visit every member, so entries are de-duplicated by path+reason.
+    /// </summary>
+    private sealed class DiagnosticCollector
+    {
+        private readonly Dictionary<string, UnsupportedMember> _items = new();
+
+        public bool HasAny => _items.Count > 0;
+
+        public IEnumerable<UnsupportedMember> Items => _items.Values;
+
+        public void Report(UnsupportedMember member) =>
+            _items[member.MemberPath + "|" + member.Reason] = member;
+    }
+
+    /// <summary>
+    /// Identifies the member currently being emitted, so an unsupported type can be
+    /// reported against it instead of silently emitting nothing.
+    /// </summary>
+    private sealed record EmitScope(DiagnosticCollector Diagnostics, string MemberPath, LocationInfo? Location)
+    {
+        public EmitScope Element() => this with { MemberPath = MemberPath + "[]" };
+
+        /// <summary>
+        /// Records a diagnostic and emits a runtime backstop, so the generated code stays
+        /// well-formed (no cascading compiler errors) and throws rather than losing data
+        /// if the diagnostic is downgraded or suppressed.
+        /// </summary>
+        public void Unsupported(StringBuilder sb, string indent, string reason, string typeName)
+        {
+            Diagnostics.Report(new UnsupportedMember(MemberPath, reason, Location));
+            sb.AppendLine($"{indent}ThrowUnsupported(\"{MemberPath}\", \"{typeName}\");");
+        }
+
+        /// <summary>Reports a type that has no read/write mapping at all.</summary>
+        public void UnsupportedType(StringBuilder sb, string indent, TypeRefInfo type)
+        {
+            var typeName = Display(type);
+            Unsupported(sb, indent, $"type '{typeName}' is not supported", typeName);
+        }
+    }
+
+    private static string Display(TypeRefInfo type) => Display(type.FullyQualifiedName);
+
+    private static string Display(string fullyQualifiedName) =>
+        fullyQualifiedName.StartsWith("global::")
+            ? fullyQualifiedName.Substring("global::".Length)
+            : fullyQualifiedName;
+
     public void Initialize(IncrementalGeneratorInitializationContext context)
     {
         // Find all classes with [BsonSerializable] attribute
@@ -64,7 +130,8 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
             classSymbol.ContainingNamespace?.ToDisplayString() ?? string.Empty,
             classSymbol.Name,
             GetAccessibility(classDeclaration),
-            new EquatableList<TypeInfo>(serializableTypes));
+            new EquatableList<TypeInfo>(serializableTypes),
+            LocationInfo.From(classDeclaration.Identifier.GetLocation()));
     }
 
     private static string GetAccessibility(ClassDeclarationSyntax classDeclaration)
@@ -95,12 +162,22 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
             if (contextClass is not { } ctx)
                 continue;
 
-            var source = GenerateContextClass(ctx);
+            var diagnostics = new DiagnosticCollector();
+            var source = GenerateContextClass(ctx, diagnostics);
             context.AddSource($"{ctx.ClassName}.g.cs", SourceText.From(source, Encoding.UTF8));
+
+            foreach (var member in diagnostics.Items)
+            {
+                context.ReportDiagnostic(Diagnostic.Create(
+                    UnsupportedType,
+                    (member.Location ?? ctx.Location)?.ToLocation() ?? Location.None,
+                    member.MemberPath,
+                    member.Reason));
+            }
         }
     }
 
-    private static string GenerateContextClass(ContextClassInfo contextClass)
+    private static string GenerateContextClass(ContextClassInfo contextClass, DiagnosticCollector diagnostics)
     {
         var sb = new StringBuilder();
         sb.AppendLine("// <auto-generated/>");
@@ -133,9 +210,9 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         // Generate Write/Read methods for each type
         foreach (var type in allTypes.Values)
         {
-            GenerateWriteMethod(sb, type);
+            GenerateWriteMethod(sb, type, diagnostics);
             sb.AppendLine();
-            GenerateReadMethod(sb, type);
+            GenerateReadMethod(sb, type, diagnostics);
             sb.AppendLine();
         }
 
@@ -145,6 +222,13 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
 
         // Generate public Deserialize method
         GenerateDeserializeMethod(sb, contextClass.SerializableTypes);
+
+        // Runtime backstop for anything MINIBSON001 was reported for
+        if (diagnostics.HasAny)
+        {
+            sb.AppendLine();
+            GenerateThrowUnsupportedMethod(sb);
+        }
 
         sb.AppendLine("}");
 
@@ -211,7 +295,7 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         };
     }
 
-    private static void GenerateWriteMethod(StringBuilder sb, TypeInfo type)
+    private static void GenerateWriteMethod(StringBuilder sb, TypeInfo type, DiagnosticCollector diagnostics)
     {
         var typeName = type.FullyQualifiedName;
         var methodName = GetSafeMethodName(type);
@@ -224,7 +308,8 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         // Get all properties including inherited ones
         foreach (var property in type.Properties)
         {
-            GenerateWriteProperty(sb, property.Name, property.Type, $"instance.{property.Name}");
+            GenerateWriteProperty(sb, property.Name, property.Type, $"instance.{property.Name}",
+                ScopeFor(diagnostics, type, property));
         }
 
         sb.AppendLine("        writer.WriteEndDocument();");
@@ -232,7 +317,10 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         sb.AppendLine("    }");
     }
 
-    private static void GenerateWriteProperty(StringBuilder sb, string name, TypeRefInfo type, string accessor)
+    private static EmitScope ScopeFor(DiagnosticCollector diagnostics, TypeInfo type, PropertyInfo property) =>
+        new(diagnostics, $"{type.Name}.{property.Name}", property.Location);
+
+    private static void GenerateWriteProperty(StringBuilder sb, string name, TypeRefInfo type, string accessor, EmitScope scope)
     {
         var isNullable = type.IsNullable;
         var underlyingType = type.NullableUnderlyingType ?? type;
@@ -243,25 +331,25 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
             sb.AppendLine($"            writer.WriteNull(\"{name}\");");
             sb.AppendLine("        else");
             sb.AppendLine("        {");
-            GenerateWriteValue(sb, name, underlyingType, accessor, "            ");
+            GenerateWriteValue(sb, name, underlyingType, accessor, "            ", scope);
             sb.AppendLine("        }");
         }
         else if (isNullable && type.IsValueType)
         {
             sb.AppendLine($"        if ({accessor}.HasValue)");
             sb.AppendLine("        {");
-            GenerateWriteValue(sb, name, underlyingType, $"{accessor}.Value", "            ");
+            GenerateWriteValue(sb, name, underlyingType, $"{accessor}.Value", "            ", scope);
             sb.AppendLine("        }");
             sb.AppendLine("        else");
             sb.AppendLine($"            writer.WriteNull(\"{name}\");");
         }
         else
         {
-            GenerateWriteValue(sb, name, underlyingType, accessor, "        ");
+            GenerateWriteValue(sb, name, underlyingType, accessor, "        ", scope);
         }
     }
 
-    private static void GenerateWriteValue(StringBuilder sb, string name, TypeRefInfo type, string accessor, string indent)
+    private static void GenerateWriteValue(StringBuilder sb, string name, TypeRefInfo type, string accessor, string indent, EmitScope scope)
     {
         // Handle byte[] as binary data
         if (type.ArrayElementType is { SpecialType: SpecialType.System_Byte })
@@ -283,7 +371,7 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
             sb.AppendLine($"{indent}writer.WriteStartArray(\"{name}\");");
             sb.AppendLine($"{indent}foreach (var item in {accessor})");
             sb.AppendLine($"{indent}{{");
-            GenerateWriteArrayElement(sb, arrayElementType, "item", indent + "    ");
+            GenerateWriteArrayElement(sb, arrayElementType, "item", indent + "    ", scope.Element());
             sb.AppendLine($"{indent}}}");
             sb.AppendLine($"{indent}writer.WriteEndArray();");
             return;
@@ -347,10 +435,13 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
             sb.AppendLine($"{indent}writer.WriteStartDocument(\"{name}\");");
             sb.AppendLine($"{indent}Write{methodName}Inner(writer, {accessor});");
             sb.AppendLine($"{indent}writer.WriteEndDocument();");
+            return;
         }
+
+        scope.UnsupportedType(sb, indent, type);
     }
 
-    private static void GenerateWriteArrayElement(StringBuilder sb, TypeRefInfo type, string accessor, string indent)
+    private static void GenerateWriteArrayElement(StringBuilder sb, TypeRefInfo type, string accessor, string indent, EmitScope scope)
     {
         var isNullable = type.IsNullable;
         var underlyingType = type.NullableUnderlyingType ?? type;
@@ -361,26 +452,33 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
             sb.AppendLine($"{indent}    writer.WriteNull();");
             sb.AppendLine($"{indent}else");
             sb.AppendLine($"{indent}{{");
-            GenerateWriteArrayElementValue(sb, underlyingType, accessor, indent + "    ");
+            GenerateWriteArrayElementValue(sb, underlyingType, accessor, indent + "    ", scope);
             sb.AppendLine($"{indent}}}");
         }
         else if (isNullable && type.IsValueType)
         {
             sb.AppendLine($"{indent}if ({accessor}.HasValue)");
             sb.AppendLine($"{indent}{{");
-            GenerateWriteArrayElementValue(sb, underlyingType, $"{accessor}.Value", indent + "    ");
+            GenerateWriteArrayElementValue(sb, underlyingType, $"{accessor}.Value", indent + "    ", scope);
             sb.AppendLine($"{indent}}}");
             sb.AppendLine($"{indent}else");
             sb.AppendLine($"{indent}    writer.WriteNull();");
         }
         else
         {
-            GenerateWriteArrayElementValue(sb, underlyingType, accessor, indent);
+            GenerateWriteArrayElementValue(sb, underlyingType, accessor, indent, scope);
         }
     }
 
-    private static void GenerateWriteArrayElementValue(StringBuilder sb, TypeRefInfo type, string accessor, string indent)
+    private static void GenerateWriteArrayElementValue(StringBuilder sb, TypeRefInfo type, string accessor, string indent, EmitScope scope)
     {
+        // Jagged arrays (including byte[][]) have no element-position mapping
+        if (type.ArrayElementType is not null)
+        {
+            scope.Unsupported(sb, indent, "nested arrays are not supported", Display(type));
+            return;
+        }
+
         // Handle enums - map to underlying type
         if (type.EnumUnderlyingType is { } enumUnderlying)
         {
@@ -425,6 +523,13 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
                 return;
         }
 
+        // Handle Guid
+        if (type.FullyQualifiedName == "global::System.Guid" || type.Name == "Guid")
+        {
+            sb.AppendLine($"{indent}writer.WriteGuid({accessor});");
+            return;
+        }
+
         // Handle nested objects in array (but not primitives)
         if (type.NestedTypeInfo is { } nestedType)
         {
@@ -432,10 +537,13 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
             sb.AppendLine($"{indent}writer.WriteStartNestedDocument();");
             sb.AppendLine($"{indent}Write{methodName}Inner(writer, {accessor});");
             sb.AppendLine($"{indent}writer.WriteEndDocument();");
+            return;
         }
+
+        scope.UnsupportedType(sb, indent, type);
     }
 
-    private static void GenerateReadMethod(StringBuilder sb, TypeInfo type)
+    private static void GenerateReadMethod(StringBuilder sb, TypeInfo type, DiagnosticCollector diagnostics)
     {
         var typeName = type.FullyQualifiedName;
         var methodName = GetSafeMethodName(type);
@@ -473,7 +581,8 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         foreach (var property in type.Properties)
         {
             sb.AppendLine($"                case \"{property.Name}\":");
-            GenerateReadProperty(sb, property.Name, property.Type, "                    ");
+            GenerateReadProperty(sb, property.Name, property.Type, "                    ",
+                ScopeFor(diagnostics, type, property));
             sb.AppendLine("                    break;");
         }
 
@@ -507,6 +616,17 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
             sb.AppendLine();
             sb.AppendLine("        );");
         }
+        else if (properties.FirstOrDefault(p => !p.IsSettable) is { } readOnlyProperty)
+        {
+            // An object initializer can't assign this, and emitting one anyway buries the
+            // user in CS0200s pointing at generated code. Report it as MINIBSON001 instead.
+            ScopeFor(diagnostics, type, readOnlyProperty).Unsupported(
+                sb,
+                "        ",
+                $"property '{readOnlyProperty.Name}' has no public setter, so the type cannot be deserialized",
+                Display(type.FullyQualifiedName));
+            sb.AppendLine("        return default;");
+        }
         else
         {
             // Use object initializer for classes
@@ -539,7 +659,8 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         foreach (var property in type.Properties)
         {
 
-            GenerateWriteProperty(sb, property.Name, property.Type, $"instance.{property.Name}");
+            GenerateWriteProperty(sb, property.Name, property.Type, $"instance.{property.Name}",
+                ScopeFor(diagnostics, type, property));
         }
 
         sb.AppendLine("#nullable restore");
@@ -563,7 +684,7 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         };
     }
 
-    private static void GenerateReadProperty(StringBuilder sb, string name, TypeRefInfo type, string indent)
+    private static void GenerateReadProperty(StringBuilder sb, string name, TypeRefInfo type, string indent, EmitScope scope)
     {
         var underlyingType = type.NullableUnderlyingType ?? type;
 
@@ -583,15 +704,15 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         }
         else if (type.ArrayElementType is { } arrayElementType)
         {
-            GenerateReadArray(sb, name, arrayElementType, indent + "    ");
+            GenerateReadArray(sb, name, arrayElementType, indent + "    ", scope.Element());
         }
         else
         {
-            GenerateReadValue(sb, name, underlyingType, indent + "    ");
+            GenerateReadValue(sb, name, underlyingType, indent + "    ", scope);
         }
     }
 
-    private static void GenerateReadArray(StringBuilder sb, string name, TypeRefInfo elementType, string indent)
+    private static void GenerateReadArray(StringBuilder sb, string name, TypeRefInfo elementType, string indent, EmitScope scope)
     {
         var elementTypeName = elementType.FullyQualifiedName;
 
@@ -609,11 +730,11 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
             sb.AppendLine($"{indent}        if (reader.CurrentType == BsonType.Null)");
             sb.AppendLine($"{indent}            list.Add(default!);");
             sb.AppendLine($"{indent}        else");
-            GenerateReadArrayElement(sb, underlyingElementType, indent + "            ");
+            GenerateReadArrayElement(sb, underlyingElementType, indent + "            ", scope);
         }
         else
         {
-            GenerateReadArrayElement(sb, underlyingElementType, indent + "        ");
+            GenerateReadArrayElement(sb, underlyingElementType, indent + "        ", scope);
         }
 
         sb.AppendLine($"{indent}    }}");
@@ -622,8 +743,15 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         sb.AppendLine($"{indent}}}");
     }
 
-    private static void GenerateReadArrayElement(StringBuilder sb, TypeRefInfo type, string indent)
+    private static void GenerateReadArrayElement(StringBuilder sb, TypeRefInfo type, string indent, EmitScope scope)
     {
+        // Jagged arrays (including byte[][]) have no element-position mapping
+        if (type.ArrayElementType is not null)
+        {
+            scope.Unsupported(sb, indent, "nested arrays are not supported", Display(type));
+            return;
+        }
+
         // Handle enums - read as underlying type and cast
         if (type.EnumUnderlyingType is { } enumUnderlying)
         {
@@ -689,10 +817,13 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
             sb.AppendLine($"{indent}    list.Add(Read{methodName}Inner(reader));");
             sb.AppendLine($"{indent}    reader.ReadEndDocument();");
             sb.AppendLine($"{indent}}}");
+            return;
         }
+
+        scope.UnsupportedType(sb, indent, type);
     }
 
-    private static void GenerateReadValue(StringBuilder sb, string name, TypeRefInfo type, string indent)
+    private static void GenerateReadValue(StringBuilder sb, string name, TypeRefInfo type, string indent, EmitScope scope)
     {
         // Handle enums - read as underlying type and cast
         if (type.EnumUnderlyingType is { } enumUnderlying)
@@ -759,7 +890,22 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
             sb.AppendLine($"{indent}    _{name} = Read{methodName}Inner(reader);");
             sb.AppendLine($"{indent}    reader.ReadEndDocument();");
             sb.AppendLine($"{indent}}}");
+            return;
         }
+
+        scope.UnsupportedType(sb, indent, type);
+    }
+
+    private static void GenerateThrowUnsupportedMethod(StringBuilder sb)
+    {
+        sb.AppendLine("    /// <summary>");
+        sb.AppendLine("    /// Backstop for members reported as MINIBSON001. Reached only if that");
+        sb.AppendLine("    /// diagnostic was downgraded or suppressed.");
+        sb.AppendLine("    /// </summary>");
+        sb.AppendLine("    private static void ThrowUnsupported(string member, string type)");
+        sb.AppendLine("        => throw new NotSupportedException(");
+        sb.AppendLine("            $\"MiniBson cannot serialize '{member}': type '{type}' is not supported \" +");
+        sb.AppendLine("            \"by the source generator (MINIBSON001).\");");
     }
 
     private static void GenerateSerializeMethod(StringBuilder sb, EquatableList<TypeInfo> types)
@@ -883,7 +1029,11 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
                 EquatableList<PropertyInfo>.Empty);
 
         var properties = GetAllProperties(symbol)
-            .Select(p => new PropertyInfo(p.Name, ExtractTypeRefInfo(p.Type, visited)))
+            .Select(p => new PropertyInfo(
+                p.Name,
+                ExtractTypeRefInfo(p.Type, visited),
+                LocationInfo.From(p),
+                p.SetMethod is { DeclaredAccessibility: Accessibility.Public }))
             .ToList();
 
         return new TypeInfo(
@@ -919,8 +1069,11 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         }
 
         TypeInfo? nestedTypeInfo = null;
-        if (symbol is INamedTypeSymbol namedType && 
-            !IsPrimitiveType(symbol) && 
+        if (symbol is INamedTypeSymbol namedType &&
+            !IsPrimitiveType(symbol) &&
+            // decimal has no BSON mapping here; treating it as a POCO would silently
+            // emit an empty document, so let it fall through to MINIBSON001 instead.
+            symbol.SpecialType != SpecialType.System_Decimal &&
             symbol is not IArrayTypeSymbol &&
             !isNullableValueType)
         {
