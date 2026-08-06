@@ -359,6 +359,22 @@ internal sealed class BsonWriter(Stream stream, bool leaveOpen = false) : IDispo
     }
 
     /// <summary>
+    /// Writes a binary array element.
+    /// </summary>
+    public void WriteBinary(ReadOnlySpan<byte> value, BsonBinarySubType subType = BsonBinarySubType.Generic)
+    {
+        WriteBinary(_arrayIndex++.ToString(), value, subType);
+    }
+
+    /// <summary>
+    /// Writes a GUID array element.
+    /// </summary>
+    public void WriteGuid(Guid value)
+    {
+        WriteGuid(_arrayIndex++.ToString(), value);
+    }
+
+    /// <summary>
     /// Writes a nested document array element.
     /// </summary>
     public void WriteStartNestedDocument()

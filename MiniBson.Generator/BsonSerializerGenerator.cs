@@ -277,19 +277,7 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
             return;
         }
 
-        // Handle arrays of enums
-        if (type.ArrayElementType is { TypeKind: TypeKind.Enum } enumArrayElementType)
-        {
-            sb.AppendLine($"{indent}writer.WriteStartArray(\"{name}\");");
-            sb.AppendLine($"{indent}foreach (var item in {accessor})");
-            sb.AppendLine($"{indent}{{");
-            GenerateWriteArrayElement(sb, enumArrayElementType, "item", indent + "    ");
-            sb.AppendLine($"{indent}}}");
-            sb.AppendLine($"{indent}writer.WriteEndArray();");
-            return;
-        }
-
-        // Handle other arrays
+        // Handle arrays
         if (type.ArrayElementType is { } arrayElementType)
         {
             sb.AppendLine($"{indent}writer.WriteStartArray(\"{name}\");");
@@ -659,8 +647,18 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
             case SpecialType.System_Int32:
                 sb.AppendLine($"{indent}list.Add(reader.ReadInt32());");
                 return;
+            case SpecialType.System_Byte:
+            case SpecialType.System_SByte:
+            case SpecialType.System_Int16:
+            case SpecialType.System_UInt16:
+                sb.AppendLine($"{indent}list.Add(({type.FullyQualifiedName})reader.ReadInt32());");
+                return;
             case SpecialType.System_Int64:
                 sb.AppendLine($"{indent}list.Add(reader.ReadInt64());");
+                return;
+            case SpecialType.System_UInt32:
+            case SpecialType.System_UInt64:
+                sb.AppendLine($"{indent}list.Add(({type.FullyQualifiedName})reader.ReadInt64());");
                 return;
             case SpecialType.System_Double:
                 sb.AppendLine($"{indent}list.Add(reader.ReadDouble());");
@@ -717,16 +715,20 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
                 sb.AppendLine($"{indent}_{name} = reader.ReadBoolean();");
                 return;
             case SpecialType.System_Int32:
+                sb.AppendLine($"{indent}_{name} = reader.ReadInt32();");
+                return;
             case SpecialType.System_Byte:
             case SpecialType.System_SByte:
             case SpecialType.System_Int16:
             case SpecialType.System_UInt16:
-                sb.AppendLine($"{indent}_{name} = reader.ReadInt32();");
+                sb.AppendLine($"{indent}_{name} = ({type.FullyQualifiedName})reader.ReadInt32();");
                 return;
             case SpecialType.System_Int64:
+                sb.AppendLine($"{indent}_{name} = reader.ReadInt64();");
+                return;
             case SpecialType.System_UInt32:
             case SpecialType.System_UInt64:
-                sb.AppendLine($"{indent}_{name} = reader.ReadInt64();");
+                sb.AppendLine($"{indent}_{name} = ({type.FullyQualifiedName})reader.ReadInt64();");
                 return;
             case SpecialType.System_Single:
                 sb.AppendLine($"{indent}_{name} = (float)reader.ReadDouble();");

@@ -12,6 +12,8 @@
         <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0"/>
         <PackageReference Include="MSTest" Version="3.6.4"/>
         <PackageReference Include="Newtonsoft.Json.Bson" Version="1.0.3"/>
+        <!-- Drives the generator in-process so MINIBSON001 can be asserted directly -->
+        <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.8.0"/>
     </ItemGroup>
 
     <ItemGroup>
@@ -20,8 +22,9 @@
 
     <ItemGroup>
       <ProjectReference Include="..\MiniBson\MiniBson.csproj" />
-      <!-- Generator is needed separately for project reference scenario -->
-      <ProjectReference Include="..\MiniBson.Generator\MiniBson.Generator.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+      <!-- Generator is needed separately for project reference scenario.
+           ReferenceOutputAssembly is on so the diagnostic tests can construct it directly. -->
+      <ProjectReference Include="..\MiniBson.Generator\MiniBson.Generator.csproj" OutputItemType="Analyzer" />
     </ItemGroup>
 
 </Project>
