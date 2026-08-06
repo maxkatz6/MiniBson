@@ -1,67 +1,11 @@
-using System;
+﻿using System;
+using System.Buffers;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
 
 namespace MiniBson;
-
-#if MINIBSON_PUBLIC
-/// <summary>
-/// BSON element types as defined in the BSON specification.
-/// </summary>
-public enum BsonType : byte
-#else
-/// <summary>
-/// BSON element types as defined in the BSON specification.
-/// </summary>
-internal enum BsonType : byte
-#endif
-{
-    Double = 0x01,
-    String = 0x02,
-    Document = 0x03,
-    Array = 0x04,
-    Binary = 0x05,
-    Undefined = 0x06, // Deprecated
-    ObjectId = 0x07,
-    Boolean = 0x08,
-    DateTime = 0x09,
-    Null = 0x0A,
-    Regex = 0x0B,
-    DBPointer = 0x0C, // Deprecated
-    JavaScript = 0x0D,
-    Symbol = 0x0E, // Deprecated
-    JavaScriptWithScope = 0x0F, // Deprecated
-    Int32 = 0x10,
-    Timestamp = 0x11,
-    Int64 = 0x12,
-    Decimal128 = 0x13,
-    MinKey = 0xFF,
-    MaxKey = 0x7F,
-}
-
-#if MINIBSON_PUBLIC
-/// <summary>
-/// BSON binary subtypes.
-/// </summary>
-public enum BsonBinarySubType : byte
-#else
-/// <summary>
-/// BSON binary subtypes.
-/// </summary>
-internal enum BsonBinarySubType : byte
-#endif
-{
-    Generic = 0x00,
-    Function = 0x01,
-    BinaryOld = 0x02, // Deprecated
-    UuidOld = 0x03, // Deprecated
-    Uuid = 0x04,
-    Md5 = 0x05,
-    Encrypted = 0x06,
-    CompressedTimeSeries = 0x07,
-    UserDefined = 0x80,
-}
 
 #if MINIBSON_PUBLIC
 /// <summary>
@@ -75,47 +19,160 @@ public sealed class BsonWriter(Stream stream, bool leaveOpen = false) : IDisposa
 internal sealed class BsonWriter(Stream stream, bool leaveOpen = false) : IDisposable
 #endif
 {
+    private const int BufferSize = 8192;
+
     private readonly Stream _stream = stream ?? throw new ArgumentNullException(nameof(stream));
-    private readonly BinaryWriter _writer = new(stream, Encoding.UTF8, leaveOpen: true);
-    private readonly Stack<long> _documentStartPositions = new();
+
+    // Offset this writer started at, so a stream positioned mid-file still resolves.
+    private readonly long _origin = stream.CanSeek ? stream.Position : 0;
+
+    // A fixed-size window, not a per-document buffer: memory does not grow with document size.
+    private byte[] _buffer = ArrayPool<byte>.Shared.Rent(BufferSize);
+    private int _staged;
+
+    // Total bytes written, staged and flushed alike. Used instead of Stream.Position, which
+    // a non-seekable stream cannot report.
+    private long _position;
+
+    private readonly Stack<DocumentFrame> _openDocuments = new();
     private int _arrayIndex;
     private readonly Stack<int> _arrayIndexStack = new();
+    private bool _disposed;
+
+    private struct DocumentFrame
+    {
+        public long StartPosition;
+
+        /// <summary>Length supplied by the caller, or 0 when the length is to be patched in.</summary>
+        public int ExpectedLength;
+    }
 
     /// <summary>
-    /// Writes the start of a BSON document.
+    /// Indicates whether documents must be opened with a known length. This is true when the
+    /// destination cannot be seeked, because the length placeholder could never be revisited.
     /// </summary>
-    public void WriteStartDocument()
+    public bool RequiresKnownLength => !_stream.CanSeek;
+
+    /// <summary>
+    /// Writes the start of a BSON document whose length is not yet known. The length is
+    /// written as a placeholder and patched in by <see cref="WriteEndDocument"/>, which
+    /// requires a seekable stream.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">
+    /// The stream cannot be seeked. Use <see cref="WriteStartDocument(int)"/> instead.
+    /// </exception>
+    public void WriteStartDocument() => WriteStartDocument(0);
+
+    /// <summary>
+    /// Writes the start of a BSON document of known length, so nothing has to be patched
+    /// afterwards. This is the only form that works on a stream that cannot be seeked.
+    /// </summary>
+    /// <param name="documentLength">
+    /// The complete encoded length of the document, including the four-byte length prefix and
+    /// the trailing null terminator, as computed by <see cref="BsonSize"/>. Pass 0 when the
+    /// length is unknown, which falls back to patching and requires a seekable stream.
+    /// </param>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <paramref name="documentLength"/> is negative, or is too small to be a valid document.
+    /// </exception>
+    /// <exception cref="InvalidOperationException">
+    /// The length is unknown and the stream cannot be seeked.
+    /// </exception>
+    public void WriteStartDocument(int documentLength)
     {
-        _documentStartPositions.Push(_stream.Position);
-        _writer.Write(0); // Placeholder for document length
+        if (documentLength != 0 && documentLength < BsonSize.DocumentOverhead)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(documentLength),
+                documentLength,
+                $"A BSON document is at least {BsonSize.DocumentOverhead} bytes. Pass 0 if the length is unknown.");
+        }
+
+        if (documentLength == 0 && RequiresKnownLength)
+        {
+            throw new InvalidOperationException(
+                "This stream cannot be seeked, so a document length placeholder could never be filled in. " +
+                "Pass the document length to WriteStartDocument, or use a seekable stream.");
+        }
+
+        _openDocuments.Push(new DocumentFrame
+        {
+            StartPosition = _position,
+            ExpectedLength = documentLength,
+        });
+
+        // Either the real length, or a placeholder patched by WriteEndDocument.
+        WriteInt32Raw(documentLength);
     }
 
     /// <summary>
     /// Writes the end of a BSON document.
     /// </summary>
+    /// <exception cref="InvalidOperationException">
+    /// The document was opened with a length that does not match the bytes actually written.
+    /// </exception>
     public void WriteEndDocument()
     {
-        _writer.Write((byte)0); // End of document marker
-        
-        var endPosition = _stream.Position;
-        var startPosition = _documentStartPositions.Pop();
-        var length = (int)(endPosition - startPosition);
-        
-        _stream.Position = startPosition;
-        _writer.Write(length);
-        _stream.Position = endPosition;
+        WriteByteRaw(0); // End of document marker
+
+        var frame = _openDocuments.Pop();
+        var length = (int)(_position - frame.StartPosition);
+
+        if (frame.ExpectedLength == 0)
+        {
+            PatchLength(frame.StartPosition, length);
+            return;
+        }
+
+        // Not conditional on build configuration: a wrong length would otherwise produce a
+        // silently malformed document.
+        if (frame.ExpectedLength != length)
+        {
+            throw new InvalidOperationException(
+                $"Document was opened with a length of {frame.ExpectedLength} bytes but {length} bytes were written. " +
+                "The computed size does not match the serialized value.");
+        }
+    }
+
+    /// <summary>
+    /// Fills in the length placeholder written by <see cref="WriteStartDocument()"/>.
+    /// </summary>
+    private void PatchLength(long startPosition, int length)
+    {
+        // Offset of _buffer[0] within the logical byte sequence.
+        var bufferOrigin = _position - _staged;
+
+        if (startPosition >= bufferOrigin)
+        {
+            // Still staged. Stage() never splits a scalar, so all four bytes are contiguous.
+            BinaryPrimitives.WriteInt32LittleEndian(
+                _buffer.AsSpan((int)(startPosition - bufferOrigin), 4), length);
+            return;
+        }
+
+        // The placeholder is already on the stream; reaching it requires seeking.
+        Flush();
+        BinaryPrimitives.WriteInt32LittleEndian(_buffer.AsSpan(0, 4), length);
+        _stream.Position = _origin + startPosition;
+        _stream.Write(_buffer, 0, 4);
+        _stream.Position = _origin + _position;
     }
 
     /// <summary>
     /// Writes the start of a BSON array.
     /// </summary>
-    public void WriteStartArray(string name)
+    /// <param name="name">Element name.</param>
+    /// <param name="documentLength">
+    /// The complete encoded length of the array document, or 0 when it is unknown. See
+    /// <see cref="WriteStartDocument(int)"/> and <see cref="BsonSize.ArrayOverhead"/>.
+    /// </param>
+    public void WriteStartArray(string name, int documentLength = 0)
     {
         WriteType(BsonType.Array);
         WriteCString(name);
         _arrayIndexStack.Push(_arrayIndex);
         _arrayIndex = 0;
-        WriteStartDocument();
+        WriteStartDocument(documentLength);
     }
 
     /// <summary>
@@ -130,11 +187,16 @@ internal sealed class BsonWriter(Stream stream, bool leaveOpen = false) : IDispo
     /// <summary>
     /// Writes a nested document field.
     /// </summary>
-    public void WriteStartDocument(string name)
+    /// <param name="name">Element name.</param>
+    /// <param name="documentLength">
+    /// The complete encoded length of the nested document, or 0 when it is unknown.
+    /// See <see cref="WriteStartDocument(int)"/>.
+    /// </param>
+    public void WriteStartDocument(string name, int documentLength = 0)
     {
         WriteType(BsonType.Document);
         WriteCString(name);
-        WriteStartDocument();
+        WriteStartDocument(documentLength);
     }
 
     /// <summary>
@@ -153,7 +215,7 @@ internal sealed class BsonWriter(Stream stream, bool leaveOpen = false) : IDispo
     {
         WriteType(BsonType.Boolean);
         WriteCString(name);
-        _writer.Write(value ? (byte)1 : (byte)0);
+        WriteByteRaw(value ? (byte)1 : (byte)0);
     }
 
     /// <summary>
@@ -163,7 +225,7 @@ internal sealed class BsonWriter(Stream stream, bool leaveOpen = false) : IDispo
     {
         WriteType(BsonType.Int32);
         WriteCString(name);
-        _writer.Write(value);
+        WriteInt32Raw(value);
     }
 
     /// <summary>
@@ -173,7 +235,7 @@ internal sealed class BsonWriter(Stream stream, bool leaveOpen = false) : IDispo
     {
         WriteType(BsonType.Int64);
         WriteCString(name);
-        _writer.Write(value);
+        WriteInt64Raw(value);
     }
 
     /// <summary>
@@ -183,7 +245,7 @@ internal sealed class BsonWriter(Stream stream, bool leaveOpen = false) : IDispo
     {
         WriteType(BsonType.Double);
         WriteCString(name);
-        _writer.Write(value);
+        WriteDoubleRaw(value);
     }
 
     /// <summary>
@@ -203,9 +265,14 @@ internal sealed class BsonWriter(Stream stream, bool leaveOpen = false) : IDispo
     {
         WriteType(BsonType.DateTime);
         WriteCString(name);
+        WriteDateTimeValue(value);
+    }
+
+    private void WriteDateTimeValue(DateTime value)
+    {
         var utc = value.Kind == DateTimeKind.Local ? value.ToUniversalTime() : value;
         var milliseconds = (long)(utc - UnixEpoch).TotalMilliseconds;
-        _writer.Write(milliseconds);
+        WriteInt64Raw(milliseconds);
     }
 
     /// <summary>
@@ -218,11 +285,7 @@ internal sealed class BsonWriter(Stream stream, bool leaveOpen = false) : IDispo
         
         WriteType(BsonType.ObjectId);
         WriteCString(name);
-#if NET6_0_OR_GREATER
-        _writer.Write(value);
-#else
-        _writer.Write(value.ToArray());
-#endif
+        WriteBytesRaw(value);
     }
 
     /// <summary>
@@ -232,25 +295,25 @@ internal sealed class BsonWriter(Stream stream, bool leaveOpen = false) : IDispo
     {
         WriteType(BsonType.Binary);
         WriteCString(name);
-        
+        WriteBinaryValue(value, subType);
+    }
+
+    private void WriteBinaryValue(ReadOnlySpan<byte> value, BsonBinarySubType subType)
+    {
         if (subType == BsonBinarySubType.BinaryOld)
         {
             // Old binary format includes an extra length prefix
-            _writer.Write(value.Length + 4);
-            _writer.Write((byte)subType);
-            _writer.Write(value.Length);
+            WriteInt32Raw(value.Length + 4);
+            WriteByteRaw((byte)subType);
+            WriteInt32Raw(value.Length);
         }
         else
         {
-            _writer.Write(value.Length);
-            _writer.Write((byte)subType);
+            WriteInt32Raw(value.Length);
+            WriteByteRaw((byte)subType);
         }
 
-#if NET6_0_OR_GREATER
-        _writer.Write(value);
-#else
-        _writer.Write(value.ToArray());
-#endif
+        WriteBytesRaw(value);
     }
 
     /// <summary>
@@ -295,19 +358,42 @@ internal sealed class BsonWriter(Stream stream, bool leaveOpen = false) : IDispo
     {
         WriteType(BsonType.Timestamp);
         WriteCString(name);
-        _writer.Write(increment);
-        _writer.Write(timestamp);
+        WriteUInt32Raw(increment);
+        WriteUInt32Raw(timestamp);
     }
 
-    // Array element writers (without name - uses index)
-    
+    // Array element writers. BSON names array elements with their decimal index, so each
+    // writes the same value as its named counterpart behind a positional header.
+
+    /// <summary>
+    /// Writes the next element's name straight to the buffer as ASCII digits, so element
+    /// names cost no allocation.
+    /// </summary>
+    private void WriteNextArrayKey()
+    {
+        var index = _arrayIndex++;
+
+        // int.MaxValue is 10 digits, filled from the least significant end.
+        Span<byte> digits = stackalloc byte[10];
+        var start = digits.Length;
+        do
+        {
+            digits[--start] = (byte)('0' + index % 10);
+            index /= 10;
+        }
+        while (index > 0);
+
+        WriteBytesRaw(digits.Slice(start));
+        WriteByteRaw(0);
+    }
+
     /// <summary>
     /// Writes a null array element.
     /// </summary>
     public void WriteNull()
     {
         WriteType(BsonType.Null);
-        WriteCString(_arrayIndex++.ToString());
+        WriteNextArrayKey();
     }
 
     /// <summary>
@@ -315,7 +401,9 @@ internal sealed class BsonWriter(Stream stream, bool leaveOpen = false) : IDispo
     /// </summary>
     public void WriteBoolean(bool value)
     {
-        WriteBoolean(_arrayIndex++.ToString(), value);
+        WriteType(BsonType.Boolean);
+        WriteNextArrayKey();
+        WriteByteRaw(value ? (byte)1 : (byte)0);
     }
 
     /// <summary>
@@ -323,7 +411,9 @@ internal sealed class BsonWriter(Stream stream, bool leaveOpen = false) : IDispo
     /// </summary>
     public void WriteInt32(int value)
     {
-        WriteInt32(_arrayIndex++.ToString(), value);
+        WriteType(BsonType.Int32);
+        WriteNextArrayKey();
+        WriteInt32Raw(value);
     }
 
     /// <summary>
@@ -331,7 +421,9 @@ internal sealed class BsonWriter(Stream stream, bool leaveOpen = false) : IDispo
     /// </summary>
     public void WriteInt64(long value)
     {
-        WriteInt64(_arrayIndex++.ToString(), value);
+        WriteType(BsonType.Int64);
+        WriteNextArrayKey();
+        WriteInt64Raw(value);
     }
 
     /// <summary>
@@ -339,7 +431,9 @@ internal sealed class BsonWriter(Stream stream, bool leaveOpen = false) : IDispo
     /// </summary>
     public void WriteDouble(double value)
     {
-        WriteDouble(_arrayIndex++.ToString(), value);
+        WriteType(BsonType.Double);
+        WriteNextArrayKey();
+        WriteDoubleRaw(value);
     }
 
     /// <summary>
@@ -347,7 +441,9 @@ internal sealed class BsonWriter(Stream stream, bool leaveOpen = false) : IDispo
     /// </summary>
     public void WriteString(string value)
     {
-        WriteString(_arrayIndex++.ToString(), value);
+        WriteType(BsonType.String);
+        WriteNextArrayKey();
+        WriteStringValue(value);
     }
 
     /// <summary>
@@ -355,7 +451,9 @@ internal sealed class BsonWriter(Stream stream, bool leaveOpen = false) : IDispo
     /// </summary>
     public void WriteDateTime(DateTime value)
     {
-        WriteDateTime(_arrayIndex++.ToString(), value);
+        WriteType(BsonType.DateTime);
+        WriteNextArrayKey();
+        WriteDateTimeValue(value);
     }
 
     /// <summary>
@@ -363,7 +461,9 @@ internal sealed class BsonWriter(Stream stream, bool leaveOpen = false) : IDispo
     /// </summary>
     public void WriteBinary(ReadOnlySpan<byte> value, BsonBinarySubType subType = BsonBinarySubType.Generic)
     {
-        WriteBinary(_arrayIndex++.ToString(), value, subType);
+        WriteType(BsonType.Binary);
+        WriteNextArrayKey();
+        WriteBinaryValue(value, subType);
     }
 
     /// <summary>
@@ -371,28 +471,49 @@ internal sealed class BsonWriter(Stream stream, bool leaveOpen = false) : IDispo
     /// </summary>
     public void WriteGuid(Guid value)
     {
-        WriteGuid(_arrayIndex++.ToString(), value);
+        Span<byte> bytes = stackalloc byte[16];
+#if NET6_0_OR_GREATER
+        value.TryWriteBytes(bytes);
+#else
+        value.ToByteArray().CopyTo(bytes);
+#endif
+        WriteBinary(bytes, BsonBinarySubType.Uuid);
     }
 
     /// <summary>
     /// Writes a nested document array element.
     /// </summary>
-    public void WriteStartNestedDocument()
+    /// <param name="documentLength">
+    /// The complete encoded length of the nested document, or 0 when it is unknown.
+    /// See <see cref="WriteStartDocument(int)"/>.
+    /// </param>
+    public void WriteStartNestedDocument(int documentLength = 0)
     {
-        WriteStartDocument(_arrayIndex++.ToString());
+        WriteType(BsonType.Document);
+        WriteNextArrayKey();
+        WriteStartDocument(documentLength);
     }
 
     /// <summary>
     /// Writes a nested array element.
     /// </summary>
-    public void WriteStartNestedArray()
+    /// <param name="documentLength">
+    /// The complete encoded length of the nested array, or 0 when it is unknown.
+    /// See <see cref="WriteStartDocument(int)"/>.
+    /// </param>
+    public void WriteStartNestedArray(int documentLength = 0)
     {
-        WriteStartArray(_arrayIndex++.ToString());
+        WriteType(BsonType.Array);
+        // Consumes this element's index before the nested array resets the counter.
+        WriteNextArrayKey();
+        _arrayIndexStack.Push(_arrayIndex);
+        _arrayIndex = 0;
+        WriteStartDocument(documentLength);
     }
 
     private void WriteType(BsonType type)
     {
-        _writer.Write((byte)type);
+        WriteByteRaw((byte)type);
     }
 
     private void WriteCString(string value)
@@ -403,39 +524,143 @@ internal sealed class BsonWriter(Stream stream, bool leaveOpen = false) : IDispo
             ? stackalloc byte[byteCount]
             : new byte[byteCount];
         var written = Encoding.UTF8.GetBytes(value, buffer);
-        _writer.Write(buffer.Slice(0, written));
+        WriteBytesRaw(buffer.Slice(0, written));
 #else
         var bytes = Encoding.UTF8.GetBytes(value);
-        _writer.Write(bytes);
+        WriteBytesRaw(bytes);
 #endif
-        _writer.Write((byte)0);
+        WriteByteRaw(0);
     }
 
     private void WriteStringValue(string value)
     {
 #if NET6_0_OR_GREATER
         var byteCount = Encoding.UTF8.GetByteCount(value);
-        _writer.Write(byteCount + 1); // length includes null terminator
+        WriteInt32Raw(byteCount + 1); // length includes null terminator
         Span<byte> buffer = byteCount <= 256
             ? stackalloc byte[byteCount]
             : new byte[byteCount];
         var written = Encoding.UTF8.GetBytes(value, buffer);
-        _writer.Write(buffer.Slice(0, written));
+        WriteBytesRaw(buffer.Slice(0, written));
 #else
         var bytes = Encoding.UTF8.GetBytes(value);
-        _writer.Write(bytes.Length + 1); // length includes null terminator
-        _writer.Write(bytes);
+        WriteInt32Raw(bytes.Length + 1); // length includes null terminator
+        WriteBytesRaw(bytes);
 #endif
-        _writer.Write((byte)0);
+        WriteByteRaw(0);
+    }
+
+    // Staging primitives. Every byte this writer emits passes through one of these and
+    // leaves through the single Flush() below, which is what keeps an alternative destination
+    // (IBufferWriter, PipeWriter) a local change rather than a rewrite.
+
+    /// <summary>
+    /// Reserves <paramref name="count"/> contiguous staged bytes. Scalars only; bulk payloads
+    /// go through <see cref="WriteBytesRaw"/>.
+    /// </summary>
+    private Span<byte> Stage(int count)
+    {
+        if (_staged + count > _buffer.Length)
+            Flush();
+
+        var span = _buffer.AsSpan(_staged, count);
+        _staged += count;
+        _position += count;
+        return span;
+    }
+
+    private void WriteByteRaw(byte value)
+    {
+        if (_staged == _buffer.Length)
+            Flush();
+
+        _buffer[_staged++] = value;
+        _position++;
+    }
+
+    private void WriteInt32Raw(int value) =>
+        BinaryPrimitives.WriteInt32LittleEndian(Stage(4), value);
+
+    private void WriteUInt32Raw(uint value) =>
+        BinaryPrimitives.WriteUInt32LittleEndian(Stage(4), value);
+
+    private void WriteInt64Raw(long value) =>
+        BinaryPrimitives.WriteInt64LittleEndian(Stage(8), value);
+
+    // Raw bits keep this little-endian on either endianness, matching BinaryWriter.
+    private void WriteDoubleRaw(double value) =>
+        WriteInt64Raw(BitConverter.DoubleToInt64Bits(value));
+
+    private void WriteBytesRaw(ReadOnlySpan<byte> value)
+    {
+        if (value.Length <= _buffer.Length - _staged)
+        {
+            value.CopyTo(_buffer.AsSpan(_staged));
+            _staged += value.Length;
+            _position += value.Length;
+            return;
+        }
+
+        Flush();
+
+        if (value.Length <= _buffer.Length)
+        {
+            value.CopyTo(_buffer.AsSpan(0));
+            _staged = value.Length;
+            _position += value.Length;
+            return;
+        }
+
+        // Larger than the staging window: go straight to the stream rather than growing the
+        // buffer, so writer memory stays bounded.
+        _position += value.Length;
+#if NET6_0_OR_GREATER
+        _stream.Write(value);
+#else
+        while (!value.IsEmpty)
+        {
+            var chunk = Math.Min(value.Length, _buffer.Length);
+            value.Slice(0, chunk).CopyTo(_buffer.AsSpan(0));
+            _stream.Write(_buffer, 0, chunk);
+            value = value.Slice(chunk);
+        }
+#endif
+    }
+
+    /// <summary>
+    /// Writes any staged bytes to the underlying stream. Called automatically when the
+    /// staging buffer fills and on <see cref="Dispose"/>.
+    /// </summary>
+    public void Flush()
+    {
+        if (_staged == 0)
+            return;
+
+        _stream.Write(_buffer, 0, _staged);
+        _staged = 0;
     }
 
     private static readonly DateTime UnixEpoch = new(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
 
     public void Dispose()
     {
-        _writer.Dispose();
-        if (!leaveOpen)
-            _stream.Dispose();
+        if (_disposed)
+            return;
+
+        _disposed = true;
+
+        try
+        {
+            Flush();
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(_buffer);
+            _buffer = [];
+
+            if (!leaveOpen)
+                _stream.Dispose();
+        }
     }
 }
 

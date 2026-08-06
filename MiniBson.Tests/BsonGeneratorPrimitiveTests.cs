@@ -72,15 +72,8 @@ public sealed class BsonGeneratorPrimitiveTests
 {
     private readonly PrimitiveBsonContext _context = new();
 
-    private byte[] Serialize(object input)
-    {
-        using var ms = new MemoryStream();
-        using (var writer = new BsonWriter(ms, leaveOpen: true))
-        {
-            _context.Serialize(input, writer);
-        }
-        return ms.ToArray();
-    }
+    private byte[] Serialize(object input) =>
+        DualPathWriter.Serialize(writer => _context.Serialize(input, writer));
 
     private T? RoundTrip<T>(T input) where T : notnull
     {

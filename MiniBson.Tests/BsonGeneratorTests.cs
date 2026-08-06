@@ -1,4 +1,4 @@
-using MiniBson;
+﻿using MiniBson;
 
 namespace MiniBson.Tests;
 
@@ -113,6 +113,14 @@ public class Type3 : Type1
     public DateTime CreatedAt { get; set; }
 }
 
+// Self-referencing: the shape where the measure pass does the most repeated work.
+public class LinkedNode
+{
+    public string Label { get; set; } = string.Empty;
+    public int Depth { get; set; }
+    public LinkedNode? Next { get; set; }
+}
+
 // Record types for testing
 public record SimpleRecord(string Name, int Value);
 
@@ -136,6 +144,7 @@ public record NestedRecord(string Title, SimpleRecord? Inner);
 [BsonSerializable(typeof(Type1))]
 [BsonSerializable(typeof(Type2))]
 [BsonSerializable(typeof(Type3))]
+[BsonSerializable(typeof(LinkedNode))]
 [BsonSerializable(typeof(SimpleRecord))]
 [BsonSerializable(typeof(RecordWithNullables))]
 [BsonSerializable(typeof(RecordWithArray))]
@@ -149,8 +158,9 @@ public sealed class BsonGeneratorTests
 
     private void Serialize(object input, Stream output)
     {
-        using var writer = new BsonWriter(output, leaveOpen: true);
-        _context.Serialize(input, writer);
+        // Routed through DualPathWriter so every test here also checks measure against write.
+        var bytes = DualPathWriter.Serialize(writer => _context.Serialize(input, writer));
+        output.Write(bytes, 0, bytes.Length);
     }
 
     private object? Deserialize(Stream input, Type type)
@@ -1062,6 +1072,35 @@ public sealed class BsonGeneratorTests
         // Records use value equality
         Assert.AreEqual(original, result);
         Assert.AreNotSame(original, result);
+    }
+
+    // Self-referencing models nest as deeply as the data, and each level is measured
+    // independently, so sizes have to agree with what is written all the way down.
+    [TestMethod]
+    [DataRow(1)]
+    [DataRow(2)]
+    [DataRow(50)]
+    public void SerializeAndDeserializeSelfReferencingType(int depth)
+    {
+        LinkedNode? head = null;
+        for (var i = depth - 1; i >= 0; i--)
+            head = new LinkedNode { Label = "node" + i, Depth = i, Next = head };
+
+        using var ms = new MemoryStream();
+        Serialize(head!, ms);
+
+        ms.Position = 0;
+        var result = (LinkedNode?)Deserialize(ms, typeof(LinkedNode));
+
+        for (var i = 0; i < depth; i++)
+        {
+            Assert.IsNotNull(result, $"Chain ended early at depth {i}.");
+            Assert.AreEqual("node" + i, result.Label);
+            Assert.AreEqual(i, result.Depth);
+            result = result.Next;
+        }
+
+        Assert.IsNull(result, "Chain should end after the final node.");
     }
 }
 

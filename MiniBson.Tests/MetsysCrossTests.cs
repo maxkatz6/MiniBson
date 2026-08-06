@@ -13,6 +13,7 @@ public class MetsysCrossTests
         writer.WriteStartDocument();
         action(writer);
         writer.WriteEndDocument();
+        writer.Flush(); // Staged bytes only reach the stream on Flush or Dispose.
         return ms.ToArray();
     }
 

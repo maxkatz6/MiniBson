@@ -16,7 +16,7 @@ The repository selects the .NET 10 SDK in `global.json` and permits roll-forward
 
 The implementation has two deliberate layers:
 
-1. `BsonReader` and `BsonWriter` understand the BSON wire format but know nothing about application models.
+1. `BsonReader`, `BsonWriter`, and `BsonSize` understand the BSON wire format but know nothing about application models. The `BsonType` and `BsonBinarySubType` enums live in `BsonTypes.cs`, since reader and writer share them.
 2. The generator emits model-specific code that calls those low-level APIs.
 
 Keep BSON encoding rules in the runtime layer. Generator changes should compose reader and writer operations rather than duplicate format logic.
@@ -40,11 +40,46 @@ Inspecting generated output is usually the quickest way to diagnose a malformed 
 
 ## Runtime design
 
-### Seekable streams
+### Document lengths and seeking
 
-BSON documents begin with their total length. `BsonWriter` writes a placeholder, then seeks back from `WriteEndDocument` to patch it. `BsonReader` also changes position when skipping values. Consequently, stream-backed readers and writers require seekable streams.
+BSON documents begin with their total length, which is unknown until the document is complete. There are only three ways to resolve that, and MiniBson uses two of them:
 
-Buffering complete documents would support non-seekable streams, but would add allocations and is not the current design.
+1. **Patch it in afterwards.** `WriteStartDocument()` writes a placeholder and `WriteEndDocument` seeks back to fill it in. Cheapest, but requires a seekable stream.
+2. **Compute it up front.** `WriteStartDocument(int)` writes the real length immediately. Works on any stream. This is what generated code does when `RequiresKnownLength` is set.
+3. **Buffer the whole document, then flush.** Deliberately not implemented: it makes writer memory scale with document size, and precomputation covers the source-generated path without that cost.
+
+Because option 3 is absent, the low-level API on a non-seekable stream must supply lengths; opening a document without one throws.
+
+`BsonReader` still changes position when skipping values, so stream-backed readers remain seekable-only. Buffer-backed readers are unaffected.
+
+### Writer buffering
+
+`BsonWriter` stages bytes in a fixed-size pooled buffer (`BufferSize`, 8 KB) and drains it through a single `Flush()`. This is a fixed window, not a per-document buffer — writer memory does not scale with document size, and payloads larger than the window go straight to the stream.
+
+Two consequences worth knowing:
+
+- Written data is not visible on the destination until `Flush()` or `Dispose()`. Tests that read a `MemoryStream` while the writer is still alive must flush first.
+- Back-patching resolves against a logical position counter rather than `Stream.Position`. When a length placeholder is still staged it is patched in the buffer; once flushed, patching seeks the stream. Both paths are covered in `BsonWriterBufferingTests`.
+
+Keeping every byte funnelled through that one `Flush()` is deliberate: an alternative destination (`IBufferWriter<byte>`, `PipeWriter`) becomes a change to that method plus an adapter, rather than a change to every write method.
+
+### Size computation
+
+`BsonSize` holds the encoded size of every BSON value and mirrors `BsonWriter` one member at a time. The two must change together — `BsonSizeTests` asserts each helper against bytes the writer actually emitted, because a wrong size is only observable as a byte count.
+
+The generator emits a `Measure{T}Inner` beside each `Write{T}Inner`, plus a `Measure{T}_{Member}Array` helper per array-typed member (the write and measure emitters derive that name from `EmitScope.MemberPath` independently, so they agree without coordinating). Field names are known at generation time, so element overhead folds to a literal; `BsonSize` members are `const`, so fixed-size values fold with it.
+
+Nested documents are measured on demand at each write site rather than memoized, which is O(N·depth). That is free for flat models and acceptable at typical nesting, but it does repeat work on deeply self-referencing graphs. A pre-order size cursor filled by the measure pass and consumed by the write pass would make it O(N); generated code is internal, so that can be retrofitted without an API change.
+
+Measure and write are two independent walks of the same object graph, so they can disagree. When they do, `WriteEndDocument` throws instead of emitting a malformed document. `DualPathWriter` routes every generator test through both framing paths and compares bytes, which is what catches divergence — a mismatch is invisible on a `MemoryStream`.
+
+## Type classification
+
+`Map(TypeRefInfo)` resolves a model type to a `BsonMapping`, and every emitter dispatches on that result. The classification order is load-bearing — `byte[]` before arrays in general, enums before the `SpecialType` switch, since an enum's own `SpecialType` is `None` — and exists in that one method rather than being repeated per emitter.
+
+Names of the scalar `BsonMapping` members are also load-bearing: emitters build call names from them, so `Int32` yields `BsonWriter.WriteInt32`, `BsonReader.ReadInt32`, and `BsonSize.Int32`. **Adding a scalar BSON type is a `BsonMapping` member, a `Map` case, and matching members on those three types — no emitter changes.** Renaming a member silently breaks code generation; the round-trip tests catch it but do not explain it.
+
+`Binary`, `BinaryMemory`, `Array`, `Nested`, and `Unsupported` are handled case by case instead, because each direction treats them differently — arrays inside arrays are rejected, `ReadOnlyMemory<byte>` has no name-less write overload, and nested documents need framing.
 
 ### Buffer-backed reads
 
@@ -111,6 +146,9 @@ The test suite is organized by responsibility:
 | File | Focus |
 | --- | --- |
 | `BsonWriterReaderTests.cs` | Low-level round trips, validation, skipping, disposal, and zero-copy binary reads |
+| `BsonSizeTests.cs` | Every `BsonSize` helper checked against bytes the writer emitted |
+| `BsonWriterBufferingTests.cs` | Staging-buffer boundaries, oversized payloads, and back-patching after a flush |
+| `BsonWriterKnownLengthTests.cs` | Caller-supplied lengths, non-seekable streams, and the length-mismatch check |
 | `BsonGeneratorTests.cs` | End-to-end generated serialization for objects, records, inheritance, nullability, and arrays |
 | `BsonGeneratorPrimitiveTests.cs` | Scalar, nullable scalar, and scalar-array mappings |
 | `BsonGeneratorEnumTests.cs` | Enum underlying types, nullable enums, arrays, and nested enums |
@@ -118,7 +156,9 @@ The test suite is organized by responsibility:
 | `MetsysCrossTests.cs` | Byte-level compatibility assertions derived from Metsys.Bson |
 | `NewtonsoftBsonCrossTests.cs` | Read and write interoperability with `Newtonsoft.Json.Bson` |
 
-When changing the wire representation, add a byte-level assertion. A round-trip test is insufficient because matching reader and writer bugs can still round-trip successfully.
+`NonSeekableStream.cs` and `DualPathWriter.cs` are shared helpers rather than test classes. `DualPathWriter` serializes twice — patched and precomputed — and asserts the results are byte-identical; the three generator suites route through it, so every model they cover validates both framing paths.
+
+When changing the wire representation, add a byte-level assertion. A round-trip test is insufficient because matching reader and writer bugs can still round-trip successfully. The same applies to sizes: only a byte count catches a wrong one.
 
 When adding a supported model shape, cover both serialization directions and place the test beside the closest existing category. Diagnostic tests construct the generator in-process and should cover new rejection paths.
 

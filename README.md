@@ -90,6 +90,24 @@ object? Deserialize(BsonReader reader, Type type);
 - Deserialization matches fields by name. Unknown fields are skipped, and missing fields retain their default values.
 - Enums are stored by numeric value. Renaming a member is safe; changing its value changes the wire format.
 
+### Streaming to non-seekable destinations
+
+Generated serializers work over any stream, including ones that cannot be seeked. When the
+destination cannot be seeked, generated code computes each document's length before writing
+it, so nothing has to be patched afterwards. Over a seekable stream it skips that work and
+lets `BsonWriter` patch lengths in, which is cheaper.
+
+This costs nothing to use, but it does add one requirement on models: **a property must
+return the same value when read twice**. Computing the size and writing the value are
+separate passes over the object graph, so a property whose value changes between them — a
+computed property returning a fresh array, or an instance mutated concurrently — makes the
+computed length wrong. `WriteEndDocument()` detects the disagreement and throws
+`InvalidOperationException`; no malformed document is produced.
+
+The check only applies on the non-seekable path, so an unstable property can pass against a
+`MemoryStream` and fail against a socket. Test against both if your models have computed
+properties.
+
 ### Supported model types
 
 | C# type | BSON representation |
@@ -207,9 +225,53 @@ reader.ReadEndDocument();
 | Int64 | `WriteInt64` | `ReadInt64` |
 | UUID | `WriteGuid` | `ReadGuid` |
 
-Stream-based readers and writers require seekable streams. BSON documents are length-prefixed, and skipping values also relies on changing the stream position.
-
 Readers constructed from `byte[]` or `ReadOnlyMemory<byte>` use the supplied buffer directly. On that path, `ReadBinaryAsMemory()` returns a zero-copy slice that aliases the input; use `ReadBinary()` when an independent copy is needed.
+
+### Streams and document lengths
+
+A BSON document begins with its total length, which is not known until the document is
+complete. `BsonWriter` resolves this in one of two ways:
+
+| Destination | How to open a document | Cost |
+| --- | --- | --- |
+| Seekable stream | `WriteStartDocument()` | A placeholder is written and patched from `WriteEndDocument()` |
+| Any stream | `WriteStartDocument(length)` | The caller supplies the length; nothing is revisited |
+
+Only the second form works on a stream that cannot be seeked, such as a network or pipe
+stream. Opening a document without a length there throws `InvalidOperationException`.
+`WriteStartDocument(string, int)`, `WriteStartArray(string, int)`,
+`WriteStartNestedDocument(int)`, and `WriteStartNestedArray(int)` take lengths the same way.
+
+The length is the complete encoded document, including its four-byte prefix and trailing
+null. `BsonSize` computes the pieces:
+
+```csharp
+var length = BsonSize.DocumentOverhead
+    + BsonSize.Element("name") + BsonSize.String("Ada")
+    + BsonSize.Element("age") + BsonSize.Int32;
+
+using var writer = new BsonWriter(networkStream, leaveOpen: true);
+writer.WriteStartDocument(length);
+writer.WriteString("name", "Ada");
+writer.WriteInt32("age", 37);
+writer.WriteEndDocument();
+```
+
+If the supplied length does not match what was written, `WriteEndDocument()` throws rather
+than emitting a malformed document. `RequiresKnownLength` reports whether the destination
+needs lengths supplied.
+
+Generated serializers handle all of this themselves — see
+[Streaming to non-seekable destinations](#streaming-to-non-seekable-destinations).
+
+`BsonReader` still requires a seekable stream, because skipping values relies on changing
+the stream position. Readers built from `byte[]` or `ReadOnlyMemory<byte>` are unaffected.
+
+### Buffering
+
+`BsonWriter` stages bytes in a fixed-size internal buffer, so written data does not reach
+the stream immediately. Call `Flush()`, or dispose the writer, before reading the
+destination. The buffer does not grow with document size.
 
 ## Contributing
 

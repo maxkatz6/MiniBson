@@ -190,6 +190,7 @@ public sealed class BsonWriterReaderTests
             writer.WriteStartDocument();
             writer.WriteBinary("bin", testBinary);
             writer.WriteEndDocument();
+            writer.Flush(); // Staged bytes only reach the stream on Flush or Dispose.
             bsonData = ms.ToArray();
         }
 
@@ -218,6 +219,7 @@ public sealed class BsonWriterReaderTests
             writer.WriteStartDocument();
             writer.WriteBinary("bin", testBinary);
             writer.WriteEndDocument();
+            writer.Flush(); // Staged bytes only reach the stream on Flush or Dispose.
             bsonData = ms.ToArray();
         }
 
@@ -274,6 +276,7 @@ public sealed class BsonWriterReaderTests
             writer.WriteStartDocument();
             writer.WriteString("key", "value");
             writer.WriteEndDocument();
+            writer.Flush(); // Staged bytes only reach the stream on Flush or Dispose.
             bsonData = ms.ToArray();
         }
 

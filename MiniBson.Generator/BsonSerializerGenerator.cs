@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Linq;
 using System.Text;
@@ -207,12 +207,14 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
             CollectAllTypes(type, allTypes);
         }
 
-        // Generate Write/Read methods for each type
+        // Generate Write/Read/Measure methods for each type
         foreach (var type in allTypes.Values)
         {
             GenerateWriteMethod(sb, type, diagnostics);
             sb.AppendLine();
             GenerateReadMethod(sb, type, diagnostics);
+            sb.AppendLine();
+            GenerateMeasureMethod(sb, type, diagnostics);
             sb.AppendLine();
         }
 
@@ -269,6 +271,141 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
 
     private const string ReadOnlyByteMemoryFullName = "global::System.ReadOnlyMemory<byte>";
 
+    /// <summary>Fully qualified so a user type named MiniBson cannot shadow it.</summary>
+    private const string SizeType = "global::MiniBson.BsonSize";
+
+    /// <summary>
+    /// Supplies a document length only when the writer cannot patch one in later; back-patching
+    /// is cheaper than measuring.
+    /// </summary>
+    private static string SizedFraming(string sizeExpression) =>
+        $"writer.RequiresKnownLength ? {sizeExpression} : 0";
+
+    /// <summary>
+    /// Type byte plus null-terminated name. Names are known here, so this folds to a literal.
+    /// </summary>
+    private static int ElementOverhead(string name) => 1 + Encoding.UTF8.GetByteCount(name) + 1;
+
+    /// <summary>
+    /// Name of the generated helper that measures one array-typed member. Derived from the
+    /// member path so the write and measure emitters agree on it without coordinating.
+    /// </summary>
+    private static string ArrayMeasureMethodName(EmitScope scope) =>
+        "Measure" + scope.MemberPath.Replace(".", "_").Replace("+", "_") + "Array";
+
+    /// <summary>
+    /// The BSON representation a model type maps onto.
+    /// </summary>
+    /// <remarks>
+    /// Scalar member names are load-bearing: emitters build call names from them, so
+    /// <c>Int32</c> yields <c>WriteInt32</c>, <c>ReadInt32</c>, and <c>BsonSize.Int32</c>.
+    /// Adding a scalar type needs a member here, a <see cref="Map"/> case, and matching members
+    /// on those three types — no emitter changes. Renaming one breaks generation silently.
+    /// The remaining members are handled case by case, since each direction differs.
+    /// </remarks>
+    private enum BsonMapping
+    {
+        /// <summary>No mapping exists. Reported as MINIBSON001 with a runtime backstop.</summary>
+        Unsupported,
+        Boolean,
+        Int32,
+        Int64,
+        Double,
+        String,
+        DateTime,
+        Guid,
+        /// <summary><c>byte[]</c>.</summary>
+        Binary,
+        /// <summary><c>ReadOnlyMemory&lt;byte&gt;</c>.</summary>
+        BinaryMemory,
+        Array,
+        Nested,
+    }
+
+    /// <summary>A model type resolved to its BSON representation.</summary>
+    private readonly record struct ValueMapping(
+        BsonMapping Kind,
+        /// <summary>Cast widening the value to its wire type when writing, or empty.</summary>
+        string WriteCast = "",
+        /// <summary>Whether reading has to narrow the wire value back to the model type.</summary>
+        bool CastOnRead = false,
+        /// <summary>Element type, for <see cref="BsonMapping.Array"/>.</summary>
+        TypeRefInfo? ElementType = null,
+        /// <summary>Target type, for <see cref="BsonMapping.Nested"/>.</summary>
+        TypeInfo? NestedType = null);
+
+    /// <summary>
+    /// Resolves a model type to its BSON representation. Every emitter dispatches on the result,
+    /// so this ordering exists in one place. It is load-bearing: <c>byte[]</c> before arrays in
+    /// general, and enums before the <see cref="SpecialType"/> switch, since an enum's own
+    /// <see cref="SpecialType"/> is <see cref="SpecialType.None"/>.
+    /// </summary>
+    private static ValueMapping Map(TypeRefInfo type)
+    {
+        if (type.ArrayElementType is { SpecialType: SpecialType.System_Byte })
+            return new ValueMapping(BsonMapping.Binary);
+
+        if (type.FullyQualifiedName == ReadOnlyByteMemoryFullName)
+            return new ValueMapping(BsonMapping.BinaryMemory);
+
+        if (type.ArrayElementType is { } elementType)
+            return new ValueMapping(BsonMapping.Array, ElementType: elementType);
+
+        if (type.EnumUnderlyingType is { } enumUnderlying)
+            return IsWideIntegral(enumUnderlying)
+                ? new ValueMapping(BsonMapping.Int64, WriteCast: "(long)", CastOnRead: true)
+                : new ValueMapping(BsonMapping.Int32, WriteCast: "(int)", CastOnRead: true);
+
+        switch (type.SpecialType)
+        {
+            case SpecialType.System_Boolean:
+                return new ValueMapping(BsonMapping.Boolean);
+
+            case SpecialType.System_Int32:
+                return new ValueMapping(BsonMapping.Int32);
+
+            // Narrower than int32 on the wire, so reading has to narrow back.
+            case SpecialType.System_Byte:
+            case SpecialType.System_SByte:
+            case SpecialType.System_Int16:
+            case SpecialType.System_UInt16:
+                return new ValueMapping(BsonMapping.Int32, CastOnRead: true);
+
+            case SpecialType.System_Int64:
+                return new ValueMapping(BsonMapping.Int64);
+
+            case SpecialType.System_UInt32:
+            case SpecialType.System_UInt64:
+                return new ValueMapping(BsonMapping.Int64, WriteCast: "(long)", CastOnRead: true);
+
+            case SpecialType.System_Double:
+                return new ValueMapping(BsonMapping.Double);
+
+            case SpecialType.System_Single:
+                return new ValueMapping(BsonMapping.Double, CastOnRead: true);
+
+            case SpecialType.System_String:
+                return new ValueMapping(BsonMapping.String);
+
+            case SpecialType.System_DateTime:
+                return new ValueMapping(BsonMapping.DateTime);
+        }
+
+        if (type.FullyQualifiedName == "global::System.Guid" || type.Name == "Guid")
+            return new ValueMapping(BsonMapping.Guid);
+
+        if (type.NestedTypeInfo is { } nestedType)
+            return new ValueMapping(BsonMapping.Nested, NestedType: nestedType);
+
+        return new ValueMapping(BsonMapping.Unsupported);
+    }
+
+    /// <summary>Integral types BSON has to widen to int64 because int32 cannot hold them.</summary>
+    private static bool IsWideIntegral(SpecialType type) =>
+        type == SpecialType.System_Int64
+        || type == SpecialType.System_UInt64
+        || type == SpecialType.System_UInt32;
+
     private static bool IsPrimitiveType(ITypeSymbol type)
     {
         // Enums are treated as primitives (mapped to their underlying type)
@@ -300,10 +437,19 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         var typeName = type.FullyQualifiedName;
         var methodName = GetSafeMethodName(type);
 
+        // Document framing only; the body lives in the Inner method so nested writes and
+        // top-level writes share one definition.
         sb.AppendLine($"    private void Write{methodName}(BsonWriter writer, {typeName} instance)");
         sb.AppendLine("    {");
+        sb.AppendLine($"        writer.WriteStartDocument({SizedFraming($"{SizeType}.DocumentOverhead + Measure{methodName}Inner(instance)")});");
+        sb.AppendLine($"        Write{methodName}Inner(writer, instance);");
+        sb.AppendLine("        writer.WriteEndDocument();");
+        sb.AppendLine("    }");
+        sb.AppendLine();
+
+        sb.AppendLine($"    private void Write{methodName}Inner(BsonWriter writer, {typeName} instance)");
+        sb.AppendLine("    {");
         sb.AppendLine("#nullable disable");
-        sb.AppendLine("        writer.WriteStartDocument();");
 
         // Get all properties including inherited ones
         foreach (var property in type.Properties)
@@ -312,7 +458,6 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
                 ScopeFor(diagnostics, type, property));
         }
 
-        sb.AppendLine("        writer.WriteEndDocument();");
         sb.AppendLine("#nullable restore");
         sb.AppendLine("    }");
     }
@@ -351,94 +496,46 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
 
     private static void GenerateWriteValue(StringBuilder sb, string name, TypeRefInfo type, string accessor, string indent, EmitScope scope)
     {
-        // Handle byte[] as binary data
-        if (type.ArrayElementType is { SpecialType: SpecialType.System_Byte })
-        {
-            sb.AppendLine($"{indent}writer.WriteBinary(\"{name}\", {accessor});");
-            return;
-        }
+        var mapping = Map(type);
+        var value = mapping.WriteCast + accessor;
 
-        // Handle ReadOnlyMemory<byte> as binary data
-        if (type.FullyQualifiedName == ReadOnlyByteMemoryFullName)
+        switch (mapping.Kind)
         {
-            sb.AppendLine($"{indent}writer.WriteBinary(\"{name}\", {accessor}.Span);");
-            return;
-        }
+            case BsonMapping.Binary:
+                sb.AppendLine($"{indent}writer.WriteBinary(\"{name}\", {accessor});");
+                return;
 
-        // Handle arrays
-        if (type.ArrayElementType is { } arrayElementType)
-        {
-            sb.AppendLine($"{indent}writer.WriteStartArray(\"{name}\");");
-            sb.AppendLine($"{indent}foreach (var item in {accessor})");
-            sb.AppendLine($"{indent}{{");
-            GenerateWriteArrayElement(sb, arrayElementType, "item", indent + "    ", scope.Element());
-            sb.AppendLine($"{indent}}}");
-            sb.AppendLine($"{indent}writer.WriteEndArray();");
-            return;
-        }
+            case BsonMapping.BinaryMemory:
+                sb.AppendLine($"{indent}writer.WriteBinary(\"{name}\", {accessor}.Span);");
+                return;
 
-        // Handle enums - map to underlying type
-        if (type.EnumUnderlyingType is { } enumUnderlying)
-        {
-            if (enumUnderlying == SpecialType.System_Int64 || enumUnderlying == SpecialType.System_UInt64 || enumUnderlying == SpecialType.System_UInt32)
-            {
-                sb.AppendLine($"{indent}writer.WriteInt64(\"{name}\", (long){accessor});");
-            }
-            else
-            {
-                sb.AppendLine($"{indent}writer.WriteInt32(\"{name}\", (int){accessor});");
-            }
-            return;
-        }
+            case BsonMapping.Array:
+                // The measure emitter defines this helper; both sides derive the name from scope.
+                var arrayMeasure = $"{ArrayMeasureMethodName(scope)}({accessor})";
+                sb.AppendLine($"{indent}writer.WriteStartArray(\"{name}\", {SizedFraming(arrayMeasure)});");
+                sb.AppendLine($"{indent}foreach (var item in {accessor})");
+                sb.AppendLine($"{indent}{{");
+                GenerateWriteArrayElement(sb, mapping.ElementType!, "item", indent + "    ", scope.Element());
+                sb.AppendLine($"{indent}}}");
+                sb.AppendLine($"{indent}writer.WriteEndArray();");
+                return;
 
-        // Handle primitives
-        switch (type.SpecialType)
-        {
-            case SpecialType.System_Boolean:
-                sb.AppendLine($"{indent}writer.WriteBoolean(\"{name}\", {accessor});");
+            case BsonMapping.Nested:
+                var methodName = GetSafeMethodName(mapping.NestedType!);
+                var nestedMeasure = $"{SizeType}.DocumentOverhead + Measure{methodName}Inner({accessor})";
+                sb.AppendLine($"{indent}writer.WriteStartDocument(\"{name}\", {SizedFraming(nestedMeasure)});");
+                sb.AppendLine($"{indent}Write{methodName}Inner(writer, {accessor});");
+                sb.AppendLine($"{indent}writer.WriteEndDocument();");
                 return;
-            case SpecialType.System_Int32:
-            case SpecialType.System_Byte:
-            case SpecialType.System_SByte:
-            case SpecialType.System_Int16:
-            case SpecialType.System_UInt16:
-                sb.AppendLine($"{indent}writer.WriteInt32(\"{name}\", {accessor});");
+
+            case BsonMapping.Unsupported:
+                scope.UnsupportedType(sb, indent, type);
                 return;
-            case SpecialType.System_Int64:
-            case SpecialType.System_UInt32:
-            case SpecialType.System_UInt64:
-                sb.AppendLine($"{indent}writer.WriteInt64(\"{name}\", (long){accessor});");
-                return;
-            case SpecialType.System_Single:
-            case SpecialType.System_Double:
-                sb.AppendLine($"{indent}writer.WriteDouble(\"{name}\", {accessor});");
-                return;
-            case SpecialType.System_String:
-                sb.AppendLine($"{indent}writer.WriteString(\"{name}\", {accessor});");
-                return;
-            case SpecialType.System_DateTime:
-                sb.AppendLine($"{indent}writer.WriteDateTime(\"{name}\", {accessor});");
+
+            default:
+                sb.AppendLine($"{indent}writer.Write{mapping.Kind}(\"{name}\", {value});");
                 return;
         }
-
-        // Handle Guid
-        if (type.FullyQualifiedName == "global::System.Guid" || type.Name == "Guid")
-        {
-            sb.AppendLine($"{indent}writer.WriteGuid(\"{name}\", {accessor});");
-            return;
-        }
-
-        // Handle nested objects (but not primitives)
-        if (type.NestedTypeInfo is { } nestedType)
-        {
-            var methodName = GetSafeMethodName(nestedType);
-            sb.AppendLine($"{indent}writer.WriteStartDocument(\"{name}\");");
-            sb.AppendLine($"{indent}Write{methodName}Inner(writer, {accessor});");
-            sb.AppendLine($"{indent}writer.WriteEndDocument();");
-            return;
-        }
-
-        scope.UnsupportedType(sb, indent, type);
     }
 
     private static void GenerateWriteArrayElement(StringBuilder sb, TypeRefInfo type, string accessor, string indent, EmitScope scope)
@@ -472,75 +569,221 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
 
     private static void GenerateWriteArrayElementValue(StringBuilder sb, TypeRefInfo type, string accessor, string indent, EmitScope scope)
     {
-        // Jagged arrays (including byte[][]) have no element-position mapping
-        if (type.ArrayElementType is not null)
-        {
-            scope.Unsupported(sb, indent, "nested arrays are not supported", Display(type));
-            return;
-        }
+        var mapping = Map(type);
+        var value = mapping.WriteCast + accessor;
 
-        // Handle enums - map to underlying type
-        if (type.EnumUnderlyingType is { } enumUnderlying)
+        switch (mapping.Kind)
         {
-            if (enumUnderlying == SpecialType.System_Int64 || enumUnderlying == SpecialType.System_UInt64 || enumUnderlying == SpecialType.System_UInt32)
-            {
-                sb.AppendLine($"{indent}writer.WriteInt64((long){accessor});");
-            }
-            else
-            {
-                sb.AppendLine($"{indent}writer.WriteInt32((int){accessor});");
-            }
-            return;
-        }
+            // Jagged arrays (including byte[][]) have no element-position mapping
+            case BsonMapping.Binary:
+            case BsonMapping.Array:
+                scope.Unsupported(sb, indent, "nested arrays are not supported", Display(type));
+                return;
 
-        // Handle primitives (array element versions without name)
-        switch (type.SpecialType)
-        {
-            case SpecialType.System_Boolean:
-                sb.AppendLine($"{indent}writer.WriteBoolean({accessor});");
+            case BsonMapping.Nested:
+                var methodName = GetSafeMethodName(mapping.NestedType!);
+                var nestedMeasure = $"{SizeType}.DocumentOverhead + Measure{methodName}Inner({accessor})";
+                sb.AppendLine($"{indent}writer.WriteStartNestedDocument({SizedFraming(nestedMeasure)});");
+                sb.AppendLine($"{indent}Write{methodName}Inner(writer, {accessor});");
+                sb.AppendLine($"{indent}writer.WriteEndDocument();");
                 return;
-            case SpecialType.System_Int32:
-            case SpecialType.System_Byte:
-            case SpecialType.System_SByte:
-            case SpecialType.System_Int16:
-            case SpecialType.System_UInt16:
-                sb.AppendLine($"{indent}writer.WriteInt32({accessor});");
+
+            // ReadOnlyMemory<byte> has no name-less write overload.
+            case BsonMapping.BinaryMemory:
+            case BsonMapping.Unsupported:
+                scope.UnsupportedType(sb, indent, type);
                 return;
-            case SpecialType.System_Int64:
-            case SpecialType.System_UInt32:
-            case SpecialType.System_UInt64:
-                sb.AppendLine($"{indent}writer.WriteInt64((long){accessor});");
-                return;
-            case SpecialType.System_Single:
-            case SpecialType.System_Double:
-                sb.AppendLine($"{indent}writer.WriteDouble({accessor});");
-                return;
-            case SpecialType.System_String:
-                sb.AppendLine($"{indent}writer.WriteString({accessor});");
-                return;
-            case SpecialType.System_DateTime:
-                sb.AppendLine($"{indent}writer.WriteDateTime({accessor});");
+
+            default:
+                sb.AppendLine($"{indent}writer.Write{mapping.Kind}({value});");
                 return;
         }
+    }
 
-        // Handle Guid
-        if (type.FullyQualifiedName == "global::System.Guid" || type.Name == "Guid")
+    // Measure emitters. Each one mirrors its Write counterpart above, in the same conditional
+    // order, and the two must be changed together: a size that disagrees with what is written
+    // makes BsonWriter throw when the document closes.
+
+    private static void GenerateMeasureMethod(StringBuilder sb, TypeInfo type, DiagnosticCollector diagnostics)
+    {
+        var typeName = type.FullyQualifiedName;
+        var methodName = GetSafeMethodName(type);
+
+        // Array members get helper methods, emitted after this one. Both sides call them.
+        var helpers = new StringBuilder();
+
+        sb.AppendLine("    /// <summary>Encoded size of this type's elements, excluding framing.</summary>");
+        sb.AppendLine($"    private static int Measure{methodName}Inner({typeName} instance)");
+        sb.AppendLine("    {");
+        sb.AppendLine("#nullable disable");
+        sb.AppendLine("        var __size = 0;");
+
+        foreach (var property in type.Properties)
         {
-            sb.AppendLine($"{indent}writer.WriteGuid({accessor});");
-            return;
+            GenerateMeasureProperty(sb, helpers, property.Name, property.Type, $"instance.{property.Name}",
+                ScopeFor(diagnostics, type, property));
         }
 
-        // Handle nested objects in array (but not primitives)
-        if (type.NestedTypeInfo is { } nestedType)
-        {
-            var methodName = GetSafeMethodName(nestedType);
-            sb.AppendLine($"{indent}writer.WriteStartNestedDocument();");
-            sb.AppendLine($"{indent}Write{methodName}Inner(writer, {accessor});");
-            sb.AppendLine($"{indent}writer.WriteEndDocument();");
-            return;
-        }
+        sb.AppendLine("        return __size;");
+        sb.AppendLine("#nullable restore");
+        sb.AppendLine("    }");
 
-        scope.UnsupportedType(sb, indent, type);
+        sb.Append(helpers);
+    }
+
+    private static void GenerateMeasureProperty(StringBuilder sb, StringBuilder helpers, string name, TypeRefInfo type, string accessor, EmitScope scope)
+    {
+        var isNullable = type.IsNullable;
+        var underlyingType = type.NullableUnderlyingType ?? type;
+
+        // WriteNull costs the element header and no value.
+        var nullSize = ElementOverhead(name);
+
+        if (isNullable && !type.IsValueType)
+        {
+            sb.AppendLine($"        if ({accessor} is null)");
+            sb.AppendLine($"            __size += {nullSize};");
+            sb.AppendLine("        else");
+            sb.AppendLine("        {");
+            GenerateMeasureValue(sb, helpers, name, underlyingType, accessor, "            ", scope);
+            sb.AppendLine("        }");
+        }
+        else if (isNullable && type.IsValueType)
+        {
+            sb.AppendLine($"        if ({accessor}.HasValue)");
+            sb.AppendLine("        {");
+            GenerateMeasureValue(sb, helpers, name, underlyingType, $"{accessor}.Value", "            ", scope);
+            sb.AppendLine("        }");
+            sb.AppendLine("        else");
+            sb.AppendLine($"            __size += {nullSize};");
+        }
+        else
+        {
+            GenerateMeasureValue(sb, helpers, name, underlyingType, accessor, "        ", scope);
+        }
+    }
+
+    private static void GenerateMeasureValue(StringBuilder sb, StringBuilder helpers, string name, TypeRefInfo type, string accessor, string indent, EmitScope scope)
+    {
+        var mapping = Map(type);
+
+        // Both this and the BsonSize consts fold, so fixed-size values cost nothing at runtime.
+        var overhead = ElementOverhead(name);
+        void Add(string valueSize) => sb.AppendLine($"{indent}__size += {overhead} + {valueSize};");
+
+        switch (mapping.Kind)
+        {
+            case BsonMapping.Binary:
+            case BsonMapping.BinaryMemory:
+                Add($"{SizeType}.Binary({accessor}.Length)");
+                return;
+
+            case BsonMapping.Array:
+                var helperName = ArrayMeasureMethodName(scope);
+                GenerateArrayMeasureHelper(helpers, helperName, type, mapping.ElementType!, scope.Element());
+                Add($"{helperName}({accessor})");
+                return;
+
+            case BsonMapping.String:
+                Add($"{SizeType}.String({accessor})");
+                return;
+
+            case BsonMapping.Nested:
+                var methodName = GetSafeMethodName(mapping.NestedType!);
+                Add($"{SizeType}.DocumentOverhead + Measure{methodName}Inner({accessor})");
+                return;
+
+            case BsonMapping.Unsupported:
+                scope.UnsupportedType(sb, indent, type);
+                return;
+
+            default:
+                Add($"{SizeType}.{mapping.Kind}");
+                return;
+        }
+    }
+
+    /// <summary>
+    /// Emits the helper measuring one array member. Returns the array's complete document
+    /// length, which is what <c>WriteStartArray</c> expects.
+    /// </summary>
+    private static void GenerateArrayMeasureHelper(StringBuilder helpers, string methodName, TypeRefInfo arrayType, TypeRefInfo elementType, EmitScope elementScope)
+    {
+        helpers.AppendLine();
+        helpers.AppendLine("    /// <summary>Encoded length of this array, framing and keys included.</summary>");
+        helpers.AppendLine($"    private static int {methodName}({arrayType.FullyQualifiedName} value)");
+        helpers.AppendLine("    {");
+        helpers.AppendLine("#nullable disable");
+        // Type bytes and index keys are counted in bulk, so the emitters below add only values.
+        helpers.AppendLine($"        var __size = {SizeType}.ArrayOverhead(value.Length);");
+        helpers.AppendLine("        foreach (var item in value)");
+        helpers.AppendLine("        {");
+        GenerateMeasureArrayElement(helpers, elementType, "item", "            ", elementScope);
+        helpers.AppendLine("        }");
+        helpers.AppendLine("        return __size;");
+        helpers.AppendLine("#nullable restore");
+        helpers.AppendLine("    }");
+    }
+
+    private static void GenerateMeasureArrayElement(StringBuilder sb, TypeRefInfo type, string accessor, string indent, EmitScope scope)
+    {
+        var isNullable = type.IsNullable;
+        var underlyingType = type.NullableUnderlyingType ?? type;
+
+        // A null element's header is already counted by ArrayOverhead, so there is no else.
+        if (isNullable && !type.IsValueType)
+        {
+            sb.AppendLine($"{indent}if ({accessor} is not null)");
+            sb.AppendLine($"{indent}{{");
+            GenerateMeasureArrayElementValue(sb, underlyingType, accessor, indent + "    ", scope);
+            sb.AppendLine($"{indent}}}");
+        }
+        else if (isNullable && type.IsValueType)
+        {
+            sb.AppendLine($"{indent}if ({accessor}.HasValue)");
+            sb.AppendLine($"{indent}{{");
+            GenerateMeasureArrayElementValue(sb, underlyingType, $"{accessor}.Value", indent + "    ", scope);
+            sb.AppendLine($"{indent}}}");
+        }
+        else
+        {
+            GenerateMeasureArrayElementValue(sb, underlyingType, accessor, indent, scope);
+        }
+    }
+
+    private static void GenerateMeasureArrayElementValue(StringBuilder sb, TypeRefInfo type, string accessor, string indent, EmitScope scope)
+    {
+        var mapping = Map(type);
+
+        void Add(string valueSize) => sb.AppendLine($"{indent}__size += {valueSize};");
+
+        switch (mapping.Kind)
+        {
+            // Jagged arrays (including byte[][]) have no element-position mapping
+            case BsonMapping.Binary:
+            case BsonMapping.Array:
+                scope.Unsupported(sb, indent, "nested arrays are not supported", Display(type));
+                return;
+
+            case BsonMapping.String:
+                Add($"{SizeType}.String({accessor})");
+                return;
+
+            case BsonMapping.Nested:
+                var methodName = GetSafeMethodName(mapping.NestedType!);
+                Add($"{SizeType}.DocumentOverhead + Measure{methodName}Inner({accessor})");
+                return;
+
+            // ReadOnlyMemory<byte> has no name-less write overload.
+            case BsonMapping.BinaryMemory:
+            case BsonMapping.Unsupported:
+                scope.UnsupportedType(sb, indent, type);
+                return;
+
+            default:
+                Add($"{SizeType}.{mapping.Kind}");
+                return;
+        }
     }
 
     private static void GenerateReadMethod(StringBuilder sb, TypeInfo type, DiagnosticCollector diagnostics)
@@ -649,22 +892,6 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         }
         sb.AppendLine("#nullable restore");
         sb.AppendLine("    }");
-
-        // Generate inner write method (without WriteStartDocument/WriteEndDocument)
-        sb.AppendLine();
-        sb.AppendLine($"    private void Write{methodName}Inner(BsonWriter writer, {typeName} instance)");
-        sb.AppendLine("    {");
-        sb.AppendLine("#nullable disable");
-
-        foreach (var property in type.Properties)
-        {
-
-            GenerateWriteProperty(sb, property.Name, property.Type, $"instance.{property.Name}",
-                ScopeFor(diagnostics, type, property));
-        }
-
-        sb.AppendLine("#nullable restore");
-        sb.AppendLine("    }");
     }
 
     private static string GetDefaultValue(TypeRefInfo type)
@@ -687,28 +914,29 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
     private static void GenerateReadProperty(StringBuilder sb, string name, TypeRefInfo type, string indent, EmitScope scope)
     {
         var underlyingType = type.NullableUnderlyingType ?? type;
+        var mapping = Map(underlyingType);
 
         sb.AppendLine($"{indent}if (reader.CurrentType == BsonType.Null)");
         sb.AppendLine($"{indent}    _{name} = default;");
         sb.AppendLine($"{indent}else");
 
-        // Handle byte[] as binary data
-        if (type.ArrayElementType is { SpecialType: SpecialType.System_Byte })
+        switch (mapping.Kind)
         {
-            sb.AppendLine($"{indent}    _{name} = reader.ReadBinary().Data;");
-        }
-        // Handle ReadOnlyMemory<byte> as binary data
-        else if (underlyingType.FullyQualifiedName == ReadOnlyByteMemoryFullName)
-        {
-            sb.AppendLine($"{indent}    _{name} = reader.ReadBinaryAsMemory().Data;");
-        }
-        else if (type.ArrayElementType is { } arrayElementType)
-        {
-            GenerateReadArray(sb, name, arrayElementType, indent + "    ", scope.Element());
-        }
-        else
-        {
-            GenerateReadValue(sb, name, underlyingType, indent + "    ", scope);
+            case BsonMapping.Binary:
+                sb.AppendLine($"{indent}    _{name} = reader.ReadBinary().Data;");
+                return;
+
+            case BsonMapping.BinaryMemory:
+                sb.AppendLine($"{indent}    _{name} = reader.ReadBinaryAsMemory().Data;");
+                return;
+
+            case BsonMapping.Array:
+                GenerateReadArray(sb, name, mapping.ElementType!, indent + "    ", scope.Element());
+                return;
+
+            default:
+                GenerateReadValue(sb, name, underlyingType, indent + "    ", scope);
+                return;
         }
     }
 
@@ -745,155 +973,65 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
 
     private static void GenerateReadArrayElement(StringBuilder sb, TypeRefInfo type, string indent, EmitScope scope)
     {
-        // Jagged arrays (including byte[][]) have no element-position mapping
-        if (type.ArrayElementType is not null)
-        {
-            scope.Unsupported(sb, indent, "nested arrays are not supported", Display(type));
-            return;
-        }
+        var mapping = Map(type);
+        var cast = mapping.CastOnRead ? $"({type.FullyQualifiedName})" : "";
 
-        // Handle enums - read as underlying type and cast
-        if (type.EnumUnderlyingType is { } enumUnderlying)
+        switch (mapping.Kind)
         {
-            var typeName = type.FullyQualifiedName;
-            if (enumUnderlying == SpecialType.System_Int64 || enumUnderlying == SpecialType.System_UInt64 || enumUnderlying == SpecialType.System_UInt32)
-            {
-                sb.AppendLine($"{indent}list.Add(({typeName})reader.ReadInt64());");
-            }
-            else
-            {
-                sb.AppendLine($"{indent}list.Add(({typeName})reader.ReadInt32());");
-            }
-            return;
-        }
+            // Jagged arrays (including byte[][]) have no element-position mapping
+            case BsonMapping.Binary:
+            case BsonMapping.Array:
+                scope.Unsupported(sb, indent, "nested arrays are not supported", Display(type));
+                return;
 
-        switch (type.SpecialType)
-        {
-            case SpecialType.System_Boolean:
-                sb.AppendLine($"{indent}list.Add(reader.ReadBoolean());");
+            case BsonMapping.Nested:
+                var methodName = GetSafeMethodName(mapping.NestedType!);
+                sb.AppendLine($"{indent}{{");
+                sb.AppendLine($"{indent}    reader.ReadStartNestedDocument();");
+                sb.AppendLine($"{indent}    list.Add(Read{methodName}Inner(reader));");
+                sb.AppendLine($"{indent}    reader.ReadEndDocument();");
+                sb.AppendLine($"{indent}}}");
                 return;
-            case SpecialType.System_Int32:
-                sb.AppendLine($"{indent}list.Add(reader.ReadInt32());");
+
+            case BsonMapping.BinaryMemory:
+            case BsonMapping.Unsupported:
+                scope.UnsupportedType(sb, indent, type);
                 return;
-            case SpecialType.System_Byte:
-            case SpecialType.System_SByte:
-            case SpecialType.System_Int16:
-            case SpecialType.System_UInt16:
-                sb.AppendLine($"{indent}list.Add(({type.FullyQualifiedName})reader.ReadInt32());");
-                return;
-            case SpecialType.System_Int64:
-                sb.AppendLine($"{indent}list.Add(reader.ReadInt64());");
-                return;
-            case SpecialType.System_UInt32:
-            case SpecialType.System_UInt64:
-                sb.AppendLine($"{indent}list.Add(({type.FullyQualifiedName})reader.ReadInt64());");
-                return;
-            case SpecialType.System_Double:
-                sb.AppendLine($"{indent}list.Add(reader.ReadDouble());");
-                return;
-            case SpecialType.System_Single:
-                sb.AppendLine($"{indent}list.Add((float)reader.ReadDouble());");
-                return;
-            case SpecialType.System_String:
-                sb.AppendLine($"{indent}list.Add(reader.ReadString());");
-                return;
-            case SpecialType.System_DateTime:
-                sb.AppendLine($"{indent}list.Add(reader.ReadDateTime());");
+
+            default:
+                sb.AppendLine($"{indent}list.Add({cast}reader.Read{mapping.Kind}());");
                 return;
         }
-
-        if (type.FullyQualifiedName == "global::System.Guid" || type.Name == "Guid")
-        {
-            sb.AppendLine($"{indent}list.Add(reader.ReadGuid());");
-            return;
-        }
-
-        // Nested object (but not primitives)
-        if (type.NestedTypeInfo is { } nestedType)
-        {
-            var methodName = GetSafeMethodName(nestedType);
-            sb.AppendLine($"{indent}{{");
-            sb.AppendLine($"{indent}    reader.ReadStartNestedDocument();");
-            sb.AppendLine($"{indent}    list.Add(Read{methodName}Inner(reader));");
-            sb.AppendLine($"{indent}    reader.ReadEndDocument();");
-            sb.AppendLine($"{indent}}}");
-            return;
-        }
-
-        scope.UnsupportedType(sb, indent, type);
     }
 
     private static void GenerateReadValue(StringBuilder sb, string name, TypeRefInfo type, string indent, EmitScope scope)
     {
-        // Handle enums - read as underlying type and cast
-        if (type.EnumUnderlyingType is { } enumUnderlying)
-        {
-            var typeName = type.FullyQualifiedName;
-            if (enumUnderlying == SpecialType.System_Int64 || enumUnderlying == SpecialType.System_UInt64 || enumUnderlying == SpecialType.System_UInt32)
-            {
-                sb.AppendLine($"{indent}_{name} = ({typeName})reader.ReadInt64();");
-            }
-            else
-            {
-                sb.AppendLine($"{indent}_{name} = ({typeName})reader.ReadInt32();");
-            }
-            return;
-        }
+        var mapping = Map(type);
+        var cast = mapping.CastOnRead ? $"({type.FullyQualifiedName})" : "";
 
-        switch (type.SpecialType)
+        switch (mapping.Kind)
         {
-            case SpecialType.System_Boolean:
-                sb.AppendLine($"{indent}_{name} = reader.ReadBoolean();");
+            case BsonMapping.Nested:
+                var methodName = GetSafeMethodName(mapping.NestedType!);
+                sb.AppendLine($"{indent}{{");
+                sb.AppendLine($"{indent}    reader.ReadStartNestedDocument();");
+                sb.AppendLine($"{indent}    _{name} = Read{methodName}Inner(reader);");
+                sb.AppendLine($"{indent}    reader.ReadEndDocument();");
+                sb.AppendLine($"{indent}}}");
                 return;
-            case SpecialType.System_Int32:
-                sb.AppendLine($"{indent}_{name} = reader.ReadInt32();");
+
+            // GenerateReadProperty resolves these before delegating here.
+            case BsonMapping.Binary:
+            case BsonMapping.BinaryMemory:
+            case BsonMapping.Array:
+            case BsonMapping.Unsupported:
+                scope.UnsupportedType(sb, indent, type);
                 return;
-            case SpecialType.System_Byte:
-            case SpecialType.System_SByte:
-            case SpecialType.System_Int16:
-            case SpecialType.System_UInt16:
-                sb.AppendLine($"{indent}_{name} = ({type.FullyQualifiedName})reader.ReadInt32();");
-                return;
-            case SpecialType.System_Int64:
-                sb.AppendLine($"{indent}_{name} = reader.ReadInt64();");
-                return;
-            case SpecialType.System_UInt32:
-            case SpecialType.System_UInt64:
-                sb.AppendLine($"{indent}_{name} = ({type.FullyQualifiedName})reader.ReadInt64();");
-                return;
-            case SpecialType.System_Single:
-                sb.AppendLine($"{indent}_{name} = (float)reader.ReadDouble();");
-                return;
-            case SpecialType.System_Double:
-                sb.AppendLine($"{indent}_{name} = reader.ReadDouble();");
-                return;
-            case SpecialType.System_String:
-                sb.AppendLine($"{indent}_{name} = reader.ReadString();");
-                return;
-            case SpecialType.System_DateTime:
-                sb.AppendLine($"{indent}_{name} = reader.ReadDateTime();");
+
+            default:
+                sb.AppendLine($"{indent}_{name} = {cast}reader.Read{mapping.Kind}();");
                 return;
         }
-
-        if (type.FullyQualifiedName == "global::System.Guid" || type.Name == "Guid")
-        {
-            sb.AppendLine($"{indent}_{name} = reader.ReadGuid();");
-            return;
-        }
-
-        // Nested object (but not primitives)
-        if (type.NestedTypeInfo is { } nestedType)
-        {
-            var methodName = GetSafeMethodName(nestedType);
-            sb.AppendLine($"{indent}{{");
-            sb.AppendLine($"{indent}    reader.ReadStartNestedDocument();");
-            sb.AppendLine($"{indent}    _{name} = Read{methodName}Inner(reader);");
-            sb.AppendLine($"{indent}    reader.ReadEndDocument();");
-            sb.AppendLine($"{indent}}}");
-            return;
-        }
-
-        scope.UnsupportedType(sb, indent, type);
     }
 
     private static void GenerateThrowUnsupportedMethod(StringBuilder sb)

@@ -107,15 +107,8 @@ public sealed class BsonGeneratorEnumTests
 {
     private readonly EnumBsonContext _context = new();
 
-    private byte[] Serialize(object input)
-    {
-        using var ms = new MemoryStream();
-        using (var writer = new BsonWriter(ms, leaveOpen: true))
-        {
-            _context.Serialize(input, writer);
-        }
-        return ms.ToArray();
-    }
+    private byte[] Serialize(object input) =>
+        DualPathWriter.Serialize(writer => _context.Serialize(input, writer));
 
     private T? Deserialize<T>(byte[] data)
     {
