@@ -1,78 +1,178 @@
 # MiniBson
 
-A minimal, trimmable, AOT-compatible BSON reader/writer library for .NET without reflection.
+MiniBson is a small BSON library for .NET. It combines a forward-only reader and writer with source-generated serialization, without using runtime reflection. The runtime library is designed for trimming and Native AOT.
 
 ## Features
 
-- **No reflection** - Fully compatible with .NET Native AOT and trimming
-- **Low-level API** - Forward-only reader and writer for maximum control
-- **Standards compliant** - Implements the [BSON specification](https://bsonspec.org/)
-- **Minimal dependencies** - Only `System.Memory` for netstandard2.0
+- Source-generated serialization for application types
+- Low-level `BsonReader` and `BsonWriter` APIs
+- No runtime reflection
+- `netstandard2.0` and `net8.0` targets
+- No runtime dependency on `net8.0`; only `System.Memory` on `netstandard2.0`
+- Conventional assembly and source-only NuGet packages
 
 ## Installation
 
-### Regular Package
+Choose the regular package for most applications:
+
 ```bash
 dotnet add package MiniBson
 ```
 
-### Source-Only Package
-For scenarios where you want the source compiled directly into your assembly (useful for avoiding dependency conflicts or further customization):
+Choose the source-only package to compile MiniBson directly into your assembly:
+
 ```bash
 dotnet add package MiniBson.Source
 ```
 
-## Usage
+The source-only package makes MiniBson types `internal` by default, preventing them from leaking into your public API or colliding with another embedded copy. Set `MiniBsonPublic` when public types are required.
 
-### Writing BSON
+Both packages include the source generator.
+
+## Source-generated serialization
+
+Declare a partial context and register each type that can appear as a top-level value:
 
 ```csharp
 using MiniBson;
 
-using var stream = new MemoryStream();
-using var writer = new BsonWriter(stream);
+public sealed class Person
+{
+    public string Name { get; set; } = string.Empty;
+    public int Age { get; set; }
+    public string[] Tags { get; set; } = [];
+}
 
-writer.WriteStartDocument();
-writer.WriteString("name", "John Doe");
-writer.WriteInt32("age", 30);
-writer.WriteBoolean("active", true);
-writer.WriteStartArray("tags");
-writer.WriteString("developer");
-writer.WriteString("gamer");
-writer.WriteEndArray();
-writer.WriteEndDocument();
-
-byte[] bsonData = stream.ToArray();
+[BsonSerializable(typeof(Person))]
+public partial class AppBsonContext
+{
+}
 ```
 
-### Reading BSON
+The generated context operates on `BsonReader` and `BsonWriter` instances, leaving ownership of streams and buffers with the caller:
 
 ```csharp
-using MiniBson;
+var context = new AppBsonContext();
+var original = new Person
+{
+    Name = "Ada",
+    Age = 37,
+    Tags = ["compiler", "math"]
+};
 
-using var reader = new BsonReader(bsonData);
+byte[] bson;
+using (var stream = new MemoryStream())
+{
+    using (var writer = new BsonWriter(stream, leaveOpen: true))
+    {
+        context.Serialize(original, writer);
+    }
+
+    bson = stream.ToArray();
+}
+
+using var reader = new BsonReader(bson);
+var copy = (Person?)context.Deserialize(reader, typeof(Person));
+```
+
+Each context exposes:
+
+```csharp
+void Serialize(object input, BsonWriter writer);
+object? Deserialize(BsonReader reader, Type type);
+```
+
+### Model behavior
+
+- Top-level dispatch uses the exact runtime type. Register every concrete type passed directly to `Serialize` or `Deserialize`.
+- Types referenced by properties are generated recursively, but are not automatically valid top-level values.
+- All public, readable instance properties are serialized under their C# names. Inherited properties are included; a derived property wins when a name is hidden.
+- Deserialization matches fields by name. Unknown fields are skipped, and missing fields retain their default values.
+- Enums are stored by numeric value. Renaming a member is safe; changing its value changes the wire format.
+
+### Supported model types
+
+| C# type | BSON representation |
+| --- | --- |
+| `bool` | Boolean |
+| `byte`, `sbyte`, `short`, `ushort`, `int` | Int32 |
+| `uint`, `long`, `ulong` | Int64 |
+| `float`, `double` | Double |
+| `string` | String |
+| `DateTime` | UTC milliseconds since the Unix epoch |
+| `Guid` | Binary, UUID subtype |
+| `byte[]`, `ReadOnlyMemory<byte>` | Binary |
+| Enums | Int32 or Int64, according to the underlying type |
+| One-dimensional arrays of supported values | Array |
+| Other classes and records | Nested document |
+| Nullable values and references | Their normal representation or Null |
+
+### Model limitations
+
+- Collections such as `List<T>` and `Dictionary<TKey, TValue>` are not supported; use arrays.
+- Multidimensional and jagged arrays are not supported.
+- `decimal` is not supported because MiniBson has no Decimal128 mapping.
+- Non-record classes require an accessible parameterless constructor, and each discovered property must have a public `set` or `init` accessor.
+- Records must be purely positional: their constructor must accept every discovered property in generated order.
+- Two types with the same simple name can produce generated method-name collisions, even when their namespaces differ.
+- A serialization context must be a partial class. A non-partial context is currently ignored without a diagnostic.
+
+Unsupported members produce compiler error `MINIBSON001` at the affected property, for example:
+
+```text
+error MINIBSON001: MiniBson cannot serialize 'Order.Total': type 'decimal' is not supported
+```
+
+Changing the diagnostic severity does not add support. Generated code contains a runtime `NotSupportedException` fallback so an unsupported member cannot silently produce an empty value.
+
+## Low-level reader and writer
+
+Use the low-level API when you need direct control over the BSON document or do not want model types.
+
+### Writing
+
+```csharp
+using var stream = new MemoryStream();
+
+using (var writer = new BsonWriter(stream, leaveOpen: true))
+{
+    writer.WriteStartDocument();
+    writer.WriteString("name", "Ada");
+    writer.WriteInt32("age", 37);
+    writer.WriteBoolean("active", true);
+
+    writer.WriteStartArray("tags");
+    writer.WriteString("compiler");
+    writer.WriteString("math");
+    writer.WriteEndArray();
+
+    writer.WriteEndDocument();
+}
+
+byte[] bson = stream.ToArray();
+```
+
+### Reading
+
+```csharp
+using var reader = new BsonReader(bson);
 reader.ReadStartDocument();
 
 while (reader.Read())
 {
-    Console.WriteLine($"{reader.CurrentName}: {reader.CurrentType}");
-    
-    switch (reader.CurrentType)
+    switch (reader.CurrentName)
     {
-        case BsonType.String:
-            Console.WriteLine($"  Value: {reader.ReadString()}");
+        case "name":
+            Console.WriteLine(reader.ReadString());
             break;
-        case BsonType.Int32:
-            Console.WriteLine($"  Value: {reader.ReadInt32()}");
+        case "age":
+            Console.WriteLine(reader.ReadInt32());
             break;
-        case BsonType.Boolean:
-            Console.WriteLine($"  Value: {reader.ReadBoolean()}");
-            break;
-        case BsonType.Array:
+        case "tags":
             reader.ReadStartArray();
             while (reader.Read())
             {
-                Console.WriteLine($"    Item: {reader.ReadString()}");
+                Console.WriteLine(reader.ReadString());
             }
             reader.ReadEndDocument();
             break;
@@ -85,31 +185,40 @@ while (reader.Read())
 reader.ReadEndDocument();
 ```
 
-## Supported BSON Types
+`ReadEndDocument()` closes the current reader context for either a document or an array.
 
-| Type | Write Method | Read Method |
-|------|-------------|-------------|
+### Supported BSON values
+
+| BSON value | Write API | Read API |
+| --- | --- | --- |
 | Double | `WriteDouble` | `ReadDouble` |
 | String | `WriteString` | `ReadString` |
-| Document | `WriteStartDocument` | `ReadStartDocument` / `ReadStartNestedDocument` |
-| Array | `WriteStartArray` | `ReadStartArray` |
-| Binary | `WriteBinary` | `ReadBinary` |
+| Document | `WriteStartDocument`, `WriteEndDocument` | `ReadStartDocument`, `ReadStartNestedDocument`, `ReadEndDocument` |
+| Array | `WriteStartArray`, `WriteEndArray` | `ReadStartArray`, `ReadEndDocument` |
+| Binary | `WriteBinary` | `ReadBinary`, `ReadBinaryAsMemory` |
 | ObjectId | `WriteObjectId` | `ReadObjectId` |
 | Boolean | `WriteBoolean` | `ReadBoolean` |
 | DateTime | `WriteDateTime` | `ReadDateTime` |
-| Null | `WriteNull` | (check `CurrentType`) |
-| Regex | `WriteRegex` | `ReadRegex` |
+| Null | `WriteNull` | Inspect `CurrentType` or use `ReadValue` |
+| Regular expression | `WriteRegex` | `ReadRegex` |
 | JavaScript | `WriteJavaScript` | `ReadJavaScript` |
 | Int32 | `WriteInt32` | `ReadInt32` |
 | Timestamp | `WriteTimestamp` | `ReadTimestamp` |
 | Int64 | `WriteInt64` | `ReadInt64` |
-| GUID | `WriteGuid` | `ReadGuid` |
+| UUID | `WriteGuid` | `ReadGuid` |
+
+Stream-based readers and writers require seekable streams. BSON documents are length-prefixed, and skipping values also relies on changing the stream position.
+
+Readers constructed from `byte[]` or `ReadOnlyMemory<byte>` use the supplied buffer directly. On that path, `ReadBinaryAsMemory()` returns a zero-copy slice that aliases the input; use `ReadBinary()` when an independent copy is needed.
+
+## Contributing
+
+See [DEVELOPMENT.md](DEVELOPMENT.md) for repository structure, design notes, tests, and packaging commands.
 
 ## Acknowledgments
 
-A substantial part of the code in this project was generated with assistance from [Claude](https://www.anthropic.com/claude).
+A substantial part of the project was created with assistance from [Claude](https://www.anthropic.com/claude).
 
 ## License
 
-MIT License - see LICENSE file for details.
-
+MiniBson is available under the [MIT License](LICENSE).
