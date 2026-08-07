@@ -1007,7 +1007,8 @@ public sealed class BsonGeneratorTests
     [TestMethod]
     public void SerializeAndDeserializeNestedRecord()
     {
-        var original = new NestedRecord("Parent", new SimpleRecord("Child", 999));
+        var inner = new SimpleRecord("Child", 999);
+        var original = new NestedRecord("Parent", inner);
 
         using var ms = new MemoryStream();
         Serialize(original, ms);
@@ -1018,8 +1019,8 @@ public sealed class BsonGeneratorTests
         Assert.IsNotNull(result);
         Assert.AreEqual(original.Title, result.Title);
         Assert.IsNotNull(result.Inner);
-        Assert.AreEqual(original.Inner.Name, result.Inner.Name);
-        Assert.AreEqual(original.Inner.Value, result.Inner.Value);
+        Assert.AreEqual(inner.Name, result.Inner.Name);
+        Assert.AreEqual(inner.Value, result.Inner.Value);
     }
 
     [TestMethod]
@@ -1093,12 +1094,81 @@ public sealed class BsonGeneratorTests
         Assert.AreNotSame(original, result);
     }
 
+    /// <summary>
+    /// A reference property not annotated as nullable can still hold one. There is no string,
+    /// binary, or document encoding of null, so both passes have to agree to write BSON Null
+    /// for it — the measure pass reporting a size the write pass then cannot produce is what a
+    /// mismatch looks like from outside.
+    /// </summary>
+    [TestMethod]
+    public void NullInANonNullableReferencePropertyIsWrittenAsNull()
+    {
+        var original = new ComplexType
+        {
+            Id = Guid.NewGuid(),
+            Name = null!,
+            Score = 1.5,
+            CreatedAt = new DateTime(2024, 1, 1, 0, 0, 0, DateTimeKind.Utc),
+            Items = null!,
+            Nested = new NestedType { Title = null!, Inner = null },
+        };
+
+        using var ms = new MemoryStream();
+        Serialize(original, ms);
+
+        ms.Position = 0;
+        var result = (ComplexType?)Deserialize(ms, typeof(ComplexType));
+
+        Assert.IsNotNull(result);
+        Assert.IsNull(result.Name);
+        Assert.IsNull(result.Items);
+        Assert.AreEqual(original.Score, result.Score);
+        Assert.IsNotNull(result.Nested);
+        Assert.IsNull(result.Nested.Title);
+    }
+
+    [TestMethod]
+    public void NullInANonNullableBinaryPropertyIsWrittenAsNull()
+    {
+        var original = new TypeWithBinaryData { Data = null!, Name = "named" };
+
+        using var ms = new MemoryStream();
+        Serialize(original, ms);
+
+        ms.Position = 0;
+        var result = (TypeWithBinaryData?)Deserialize(ms, typeof(TypeWithBinaryData));
+
+        Assert.IsNotNull(result);
+        Assert.IsNull(result.Data);
+        Assert.AreEqual("named", result.Name);
+    }
+
+    [TestMethod]
+    public void NullElementsInANonNullableStringArrayAreWrittenAsNull()
+    {
+        var original = new TypeWithArrays
+        {
+            Numbers = [1, 2],
+            Tags = ["a", null!, "c"],
+        };
+
+        using var ms = new MemoryStream();
+        Serialize(original, ms);
+
+        ms.Position = 0;
+        var result = (TypeWithArrays?)Deserialize(ms, typeof(TypeWithArrays));
+
+        Assert.IsNotNull(result);
+        CollectionAssert.AreEqual(new[] { "a", null, "c" }, result.Tags);
+    }
+
     // Self-referencing models nest as deeply as the data, and each level is measured
     // independently, so sizes have to agree with what is written all the way down.
     [TestMethod]
     [DataRow(1)]
     [DataRow(2)]
     [DataRow(50)]
+    [DataRow(500)]
     public void SerializeAndDeserializeSelfReferencingType(int depth)
     {
         LinkedNode? head = null;

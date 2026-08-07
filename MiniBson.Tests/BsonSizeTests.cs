@@ -223,9 +223,10 @@ public sealed class BsonSizeTests
     }
 
     [TestMethod]
-    public void ArrayKeyBytesIgnoresNegativeCount()
+    public void NegativeCountIsRejected()
     {
-        Assert.AreEqual(0, BsonSize.ArrayKeyBytes(-1));
+        Assert.Throws<ArgumentOutOfRangeException>(() => BsonSize.ArrayKeyBytes(-1));
+        Assert.Throws<ArgumentOutOfRangeException>(() => BsonSize.ArrayOverhead(-1));
     }
 
     // Guards the closed-form loop against overflow in the top digit group.
@@ -237,5 +238,20 @@ public sealed class BsonSizeTests
             brute += i.ToString().Length + 1;
 
         Assert.AreEqual(brute, BsonSize.ArrayKeyBytes(20000));
+    }
+
+    /// <summary>
+    /// The keys alone outgrow an int well before the element count does. Accumulating in an
+    /// int wraps to a negative length, which the writer then rejects with a message about the
+    /// document being too small.
+    /// </summary>
+    [TestMethod]
+    public void CountWhoseKeysOutgrowAnIntIsRejected()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => BsonSize.ArrayKeyBytes(int.MaxValue));
+        Assert.Throws<ArgumentOutOfRangeException>(() => BsonSize.ArrayOverhead(int.MaxValue));
+
+        // Just under the boundary still answers, and answers correctly.
+        Assert.IsTrue(BsonSize.ArrayKeyBytes(190_000_000) > 0);
     }
 }

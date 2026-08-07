@@ -28,8 +28,25 @@ public sealed class BsonGeneratorDiagnosticTests
 
     private static ImmutableArray<Diagnostic> RunGenerator([StringSyntax("csharp")] string modelSource)
     {
-        var source = BuildSource(modelSource);
+        Run(BuildSource(modelSource), out _, out var diagnostics);
+        return diagnostics;
+    }
 
+    /// <summary>
+    /// Diagnostics from compiling the generated code, rather than from producing it. Some
+    /// mistakes only surface here, as errors inside a file the user cannot edit.
+    /// </summary>
+    private static ImmutableArray<Diagnostic> CompileGenerated([StringSyntax("csharp")] string source)
+    {
+        Run(source, out var updated, out _);
+        return updated.GetDiagnostics();
+    }
+
+    private static void Run(
+        string source,
+        out Compilation updated,
+        out ImmutableArray<Diagnostic> generatorDiagnostics)
+    {
         var references = AppDomain.CurrentDomain.GetAssemblies()
             .Where(a => !a.IsDynamic && !string.IsNullOrEmpty(a.Location))
             .Select(a => a.Location)
@@ -48,9 +65,7 @@ public sealed class BsonGeneratorDiagnosticTests
 
         CSharpGeneratorDriver
             .Create(new BsonSerializerGenerator())
-            .RunGeneratorsAndUpdateCompilation(compilation, out _, out var diagnostics);
-
-        return diagnostics;
+            .RunGeneratorsAndUpdateCompilation(compilation, out updated, out generatorDiagnostics);
     }
 
     private static Diagnostic SingleUnsupported([StringSyntax("csharp")] string modelSource)
@@ -217,5 +232,60 @@ public sealed class BsonGeneratorDiagnosticTests
 
         Assert.AreEqual(0, diagnostics.Length,
             "Expected no diagnostics, got: " + string.Join("; ", diagnostics));
+    }
+
+    /// <summary>
+    /// Two models can legally share a simple name. Generated helpers all land in one partial
+    /// class, so naming them after the simple name emits the same member twice — a CS0111 in
+    /// a file the user cannot edit and did not write.
+    /// </summary>
+    [TestMethod]
+    public void ModelsSharingASimpleNameCompile()
+    {
+        var errors = CompileGenerated(
+            """
+            using System;
+            using MiniBson;
+
+            namespace Ordering
+            {
+                public class Order
+                {
+                    public string Reference { get; set; } = "";
+                    public Line[] Items { get; set; } = [];
+                }
+
+                public class Line
+                {
+                    public int Quantity { get; set; }
+                }
+            }
+
+            namespace Billing
+            {
+                public class Order
+                {
+                    public string Reference { get; set; } = "";
+                    public Line[] Items { get; set; } = [];
+                }
+
+                public class Line
+                {
+                    public double Amount { get; set; }
+                }
+            }
+
+            namespace App
+            {
+                [BsonSerializable(typeof(Ordering.Order))]
+                [BsonSerializable(typeof(Billing.Order))]
+                public partial class Context;
+            }
+            """)
+            .Where(d => d.Severity == DiagnosticSeverity.Error)
+            .ToArray();
+
+        Assert.AreEqual(0, errors.Length,
+            "Generated code should compile, got: " + string.Join("; ", errors.Select(e => e.ToString())));
     }
 }

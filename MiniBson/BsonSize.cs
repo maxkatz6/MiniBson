@@ -1,4 +1,5 @@
-﻿using System.Text;
+﻿using System;
+using System.Text;
 
 namespace MiniBson;
 
@@ -68,9 +69,15 @@ internal static class BsonSize
     public static int Element(string name) => Element(Encoding.UTF8.GetByteCount(name));
 
     /// <summary>
-    /// Size of a string value. Returns <see cref="Empty"/> for <see langword="null"/>, matching
-    /// a caller that writes <see cref="BsonWriter.WriteNull(string)"/> instead.
+    /// Size of a string value. Returns <see cref="Empty"/> for <see langword="null"/>, which is
+    /// the size of the value a caller must write for it: <see cref="BsonWriter.WriteNull(string)"/>.
     /// </summary>
+    /// <remarks>
+    /// There is no string encoding of <see langword="null"/>, so
+    /// <see cref="BsonWriter.WriteString(string, string)"/> throws for one. A caller that
+    /// measures a null here and then writes it as a string has measured a document it cannot
+    /// produce.
+    /// </remarks>
     public static int String(string? value) =>
         value is null ? Empty : 4 + Encoding.UTF8.GetByteCount(value) + 1;
 
@@ -92,7 +99,15 @@ internal static class BsonSize
     /// element, a type byte and the null-terminated decimal index used as its name.
     /// </summary>
     /// <param name="count">Number of elements in the array.</param>
-    public static int ArrayOverhead(int count) => DocumentOverhead + count + ArrayKeyBytes(count);
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <paramref name="count"/> is negative, or its framing alone is longer than a BSON length
+    /// prefix can express.
+    /// </exception>
+    public static int ArrayOverhead(int count)
+    {
+        RequireNonNegative(count);
+        return Checked((long)DocumentOverhead + count + ArrayKeyBytesCore(count), count);
+    }
 
     /// <summary>
     /// Total bytes of the null-terminated decimal keys BSON assigns to array elements,
@@ -101,13 +116,27 @@ internal static class BsonSize
     /// <remarks>
     /// Computed per digit group, so the cost does not grow with <paramref name="count"/>.
     /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <paramref name="count"/> is negative, or its keys are longer than a BSON length prefix
+    /// can express.
+    /// </exception>
     public static int ArrayKeyBytes(int count)
+    {
+        RequireNonNegative(count);
+        return Checked(ArrayKeyBytesCore(count), count);
+    }
+
+    /// <summary>
+    /// Accumulated in 64 bits: an array long enough to need ten-digit keys costs more key
+    /// bytes than an int can hold, and wrapping would hand back a plausible-looking length.
+    /// </summary>
+    private static long ArrayKeyBytesCore(int count)
     {
         if (count <= 0)
             return 0;
 
         var last = count - 1;
-        var total = 0;
+        var total = 0L;
         var lower = 0;
         var upper = 9;
         var digits = 1;
@@ -115,7 +144,7 @@ internal static class BsonSize
         while (lower <= last)
         {
             var high = upper < last ? upper : last;
-            total += (high - lower + 1) * (digits + 1);
+            total += (long)(high - lower + 1) * (digits + 1);
 
             if (upper >= last)
                 break;
@@ -126,5 +155,25 @@ internal static class BsonSize
         }
 
         return total;
+    }
+
+    private static void RequireNonNegative(int count)
+    {
+        if (count < 0)
+            throw new ArgumentOutOfRangeException(nameof(count), count, "An array cannot have a negative element count.");
+    }
+
+    private static int Checked(long total, int count)
+    {
+        if (total > int.MaxValue)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(count),
+                count,
+                $"An array of {count} elements needs {total} bytes of framing, which a BSON " +
+                $"length prefix cannot express (the maximum is {int.MaxValue}).");
+        }
+
+        return (int)total;
     }
 }

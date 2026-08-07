@@ -16,7 +16,7 @@ The repository selects the .NET 10 SDK in `global.json` and permits roll-forward
 
 The implementation has two deliberate layers:
 
-1. `BsonReader`, `BsonWriter`, and `BsonSize` understand the BSON wire format but know nothing about application models. The `BsonType` and `BsonBinarySubType` enums live in `BsonTypes.cs`, since reader and writer share them.
+1. `BsonReader`, `BsonWriter`, and `BsonSize` understand the BSON wire format but know nothing about application models. The `BsonType` and `BsonBinarySubType` enums live in `BsonTypes.cs`, since reader and writer share them. `BsonSizeTable` sits beside them as the one runtime type that exists only for generated code.
 2. The generator emits model-specific code that calls those low-level APIs.
 
 Keep BSON encoding rules in the runtime layer. Generator changes should compose reader and writer operations rather than duplicate format logic.
@@ -54,32 +54,45 @@ Because option 3 is absent, the low-level API on a non-seekable stream must supp
 
 `BsonReader` needs two things from a position: knowing where the current document ends, and moving forward over skipped values. Neither requires seeking.
 
-It maintains `_position` itself — a count of bytes consumed — and every read goes through a `*Core` wrapper that keeps it accurate. `Advance` handles forward movement: it seeks when the stream can, and otherwise reads into a pooled discard buffer and throws the bytes away. Keeping the seek path matters because generated deserializers skip every unknown field, and a large skipped value would otherwise be copied rather than jumped over.
+It maintains `_position` itself — a count of bytes consumed — and every read goes through a primitive that keeps it accurate. `Advance` handles forward movement: it drops buffered bytes first, then seeks when the stream can, and otherwise reads and discards. Keeping the seek path matters because generated deserializers skip every unknown field, and a large skipped value would otherwise be copied rather than jumped over.
 
-The reader consumes exactly its document and never reads ahead, so a stream can hold several documents in sequence. That constraint is why `ReadCString` reads one byte at a time on the stream path (`ReadCStringFromStream`): finding the terminator by scanning would need lookahead the reader cannot give back.
+### The read window
 
-Buffered reading — a pooled read window like the one `BsonWriter` uses — was considered and deferred. It is a bigger problem than the writer's: values can span refills, values can exceed the window, and the window has to be bounded by the root document's length or it eats bytes belonging to whatever follows. It is a perf change rather than a correctness one, and keeping it separate kept the non-seekable work reviewable.
+Reads come from a pooled window (`WindowSize`, 8 KB) over the input, held as the half-open range `[_start, _end)` of `_buffer`. A reader constructed from `byte[]` or `ReadOnlyMemory<byte>` points that window at the caller's own storage and never refills; a stream-backed reader rents a window and refills it. Unifying the two removed the parallel buffer-backed and stream paths, and with them a class of bug where a slice-relative read used array-relative bounds.
+
+Three constraints shape the refill:
+
+- **Read-ahead stops at the end of the outermost open document** (`_readLimit`). Without that bound, a reader on a socket would consume bytes belonging to the next message — or block waiting for a peer that has sent its message and is waiting for a reply. `RefillTarget` computes how much of the window may be filled; with no document open it reads exactly what was asked for, which is how a document's own four-byte length prefix is read without overshooting.
+- **Values can span refills.** `ReadCString` decodes from the window when the terminator is already in it, which is the common case, and otherwise accumulates across refills in `ReadCStringAcrossRefills`. Length-prefixed strings decode in place when they fit the window.
+- **Values can exceed the window.** `ReadExact` takes what the window has and then reads the remainder straight into the caller's array, so a binary payload is never staged through the window.
+
+`EnsureWithinDocument` is the single place a read is checked against `_readLimit`. Only a malformed length gets there, and consuming those bytes would corrupt whatever follows on the stream, so it throws.
+
+Keeping every byte come from that one window is deliberate: an alternative source (`ReadOnlySequence<byte>`, `PipeReader`) becomes a change to the refill path plus an adapter, rather than a change to every read method.
 
 ### Writer buffering
 
-`BsonWriter` stages bytes in a fixed-size pooled buffer (`BufferSize`, 8 KB) and drains it through a single `Flush()`. This is a fixed window, not a per-document buffer — writer memory does not scale with document size, and payloads larger than the window go straight to the stream.
+`BsonWriter` stages bytes in a fixed-size pooled buffer (`BufferSize`, 8 KB) and moves them to the stream through a single `Drain()`. This is a fixed window, not a per-document buffer — writer memory does not scale with document size, and payloads larger than the window go straight to the stream.
 
-Two consequences worth knowing:
+Three consequences worth knowing:
 
-- Written data is not visible on the destination until `Flush()` or `Dispose()`. Tests that read a `MemoryStream` while the writer is still alive must flush first.
-- Back-patching resolves against a logical position counter rather than `Stream.Position`. When a length placeholder is still staged it is patched in the buffer; once flushed, patching seeks the stream. Both paths are covered in `BsonWriterBufferingTests`.
+- **Closing a top-level document drains.** Staging is otherwise observable from outside: callers wrote against write-through semantics before the buffer existed, and holding a finished document back breaks them with no error. Only a document still open stays staged.
+- `Flush()` drains *and* flushes the stream; `Drain()` does not, because flushing the destination every time the window fills would defeat whatever buffering the caller wrapped it in. `Dispose` does what `Flush` does.
+- Back-patching resolves against a logical position counter rather than `Stream.Position`. When a length placeholder is still staged it is patched in the buffer; once drained, patching seeks the stream. Both paths are covered in `BsonWriterBufferingTests`.
 
-Keeping every byte funnelled through that one `Flush()` is deliberate: an alternative destination (`IBufferWriter<byte>`, `PipeWriter`) becomes a change to that method plus an adapter, rather than a change to every write method.
+Keeping every byte funnelled through that one `Drain()` is deliberate, for the same reason as the reader's window: an alternative destination (`IBufferWriter<byte>`, `PipeWriter`) becomes a change to that method plus an adapter, rather than a change to every write method.
 
 ### Size computation
 
 `BsonSize` holds the encoded size of every BSON value and mirrors `BsonWriter` one member at a time. The two must change together — `BsonSizeTests` asserts each helper against bytes the writer actually emitted, because a wrong size is only observable as a byte count.
 
-The generator emits a `Measure{T}Inner` beside each `Write{T}Inner`, plus a `Measure{T}_{Member}Array` helper per array-typed member (the write and measure emitters derive that name from `EmitScope.MemberPath` independently, so they agree without coordinating). Field names are known at generation time, so element overhead folds to a literal; `BsonSize` members are `const`, so fixed-size values fold with it.
+The generator emits a `Measure{T}Inner` beside each `Write{T}Inner`, plus a `Measure{T}_{Member}Array` helper per array-typed member, named from `EmitScope.MethodPath` so that two models sharing a simple name do not emit it twice. Field names are known at generation time, so element overhead folds to a literal; `BsonSize` members are `const`, so fixed-size values fold with it. Measure bodies accumulate in a `checked` block: a size that wrapped would agree with nothing, and the writer would be told to open a document it cannot describe.
 
-Nested documents are measured on demand at each write site rather than memoized, which is O(N·depth). That is free for flat models and acceptable at typical nesting, but it does repeat work on deeply self-referencing graphs. A pre-order size cursor filled by the measure pass and consumed by the write pass would make it O(N); generated code is internal, so that can be retrofitted without an API change.
+Nested documents are measured once, not once per write site. `BsonSizeTable` carries the results: the measure pass reserves a slot per document on the way down and fills it on the way back up, and the write pass reads them back with `Next()` in the same pre-order. Both passes visit members in the same order under the same conditions, so they agree by construction; `Next()` throws rather than returning a wrong length if they ever stop agreeing. Measuring each nested document again where it is written would be O(N·depth), which is free for flat models and quadratic for deeply self-referencing ones.
 
-`GetSerializedSize` on the generated context is the same measurement exposed publicly, so it costs nothing beyond the dispatch. There is deliberately no reader-side counterpart: a reader already knows its document's length once it has read the prefix, and no use case has come up that the caller could not serve by reading that prefix itself.
+On a seekable destination the measure pass does not run at all. `BsonSizeTable.None` stands in — a shared instance whose `Next()` returns 0, which the writer reads as "patch it in later" — so the write pass takes the same code path either way.
+
+`GetSerializedSize` on the generated context is the same measurement exposed publicly, measured into `BsonSizeTable.None` since nothing is going to replay it. There is deliberately no reader-side counterpart: a reader already knows its document's length once it has read the prefix, and no use case has come up that the caller could not serve by reading that prefix itself.
 
 Measure and write are two independent walks of the same object graph, so they can disagree. When they do, `WriteEndDocument` throws instead of emitting a malformed document. `DualPathWriter` routes every generator test through both framing paths and compares bytes, which is what catches divergence — a mismatch is invisible on a `MemoryStream`.
 
@@ -93,7 +106,9 @@ Names of the scalar `BsonMapping` members are also load-bearing: emitters build 
 
 ### Buffer-backed reads
 
-A reader constructed from `byte[]` or `ReadOnlyMemory<byte>` retains the original storage and reads directly from it. This avoids the copying path used for streams. `ReadBinaryAsMemory()` can therefore return a slice that aliases caller-owned memory; `ReadBinary()` always returns a copy.
+A reader constructed from `byte[]` or `ReadOnlyMemory<byte>` points its read window at the original storage rather than renting one, so there is no copy and no refill. `ReadBinaryAsMemory()` can therefore return a slice that aliases caller-owned memory; `ReadBinary()` always returns a copy.
+
+The window is the caller's *slice*, not the array behind it. A `ReadOnlyMemory<byte>` is very often a view into a larger buffer holding other documents, and a read that resolved against the array's bounds could compose a value out of a neighbour's bytes rather than failing.
 
 ### Numeric conversions
 
@@ -141,7 +156,7 @@ The generator reports `MINIBSON001` for members without a read/write mapping, in
 
 A context declaration without `partial` is currently ignored without a diagnostic.
 
-Generated helper names are based on simple type names. Two models with the same simple name can therefore collide even if their namespaces differ.
+Generated member names come from `GetSafeMethodName`, which builds an identifier from the *fully qualified* type name. Every helper for every model lands in one partial class, so a name derived from the simple name makes two models called `Order` in different namespaces emit the same members — a CS0111 in a file the user cannot edit. `EmitScope.MethodPath` exists for the same reason: `MemberPath` names a member to the user in a diagnostic and keeps simple names for readability, so identifiers cannot be derived from it.
 
 ### Incremental pipeline
 
@@ -160,6 +175,7 @@ The test suite is organized by responsibility:
 | `BsonWriterBufferingTests.cs` | Staging-buffer boundaries, oversized payloads, and back-patching after a flush |
 | `BsonWriterKnownLengthTests.cs` | Caller-supplied lengths, non-seekable streams, and the length-mismatch check |
 | `BsonReaderNonSeekableTests.cs` | Reading and skipping without seeking, short reads, and exact document consumption |
+| `BsonReaderWindowTests.cs` | What the read window refuses to read past: corrupt lengths, slice bounds, and read-ahead across sequential documents |
 | `BsonGeneratorTests.cs` | End-to-end generated serialization for objects, records, inheritance, nullability, and arrays |
 | `BsonGeneratorPrimitiveTests.cs` | Scalar, nullable scalar, and scalar-array mappings |
 | `BsonGeneratorEnumTests.cs` | Enum underlying types, nullable enums, arrays, and nested enums |

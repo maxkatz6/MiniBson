@@ -1,5 +1,6 @@
-﻿using System;
+using System;
 using System.Buffers;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -11,32 +12,52 @@ namespace MiniBson;
 /// <summary>
 /// A low-level, forward-only BSON reader.
 /// </summary>
-public sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDisposable
+public sealed class BsonReader : IDisposable
 #else
 /// <summary>
 /// A low-level, forward-only BSON reader.
 /// </summary>
-internal sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDisposable
+internal sealed class BsonReader : IDisposable
 #endif
 {
-    private readonly Stream _stream = stream ?? throw new ArgumentNullException(nameof(stream));
-    private readonly BinaryReader _reader = new(stream, Encoding.UTF8, leaveOpen: true);
+    private const int WindowSize = 8192;
+
+    /// <summary>
+    /// Smallest length a JavaScript-with-scope value can declare: its own int32, an empty
+    /// string, and an empty document.
+    /// </summary>
+    private const int JavaScriptWithScopeOverhead = 4 + 5 + BsonSize.DocumentOverhead;
+
+    private readonly Stream? _stream;
+    private readonly bool _leaveOpen;
+    private readonly bool _canSeek;
+
+    /// <summary>
+    /// True when <see cref="_buffer"/> is the caller's own storage rather than a rented read
+    /// window: it already holds the whole input, nothing can refill it, and slices of it can
+    /// be handed out without copying.
+    /// </summary>
+    private readonly bool _bufferIsSource;
+
+    // Bytes available to read, as the half-open range [_start, _end) of _buffer. Everything
+    // this reader consumes comes from here; the stream is touched only to refill it, which is
+    // what keeps an alternative source (ReadOnlySequence, PipeReader) a change to the refill
+    // path rather than to every read method.
+    private byte[] _buffer;
+    private int _start;
+    private int _end;
+
     private readonly Stack<DocumentContext> _contextStack = new();
 
-    private readonly bool _canSeek = stream.CanSeek;
-
-    // Bytes consumed so far. Used instead of Stream.Position, which a non-seekable stream
-    // cannot report. Document ends are tracked against it.
+    // Bytes consumed so far, counted rather than asked of the stream, which a non-seekable one
+    // cannot answer. Document ends are tracked against it.
     private long _position;
 
-    // Rented on the first skip over a non-seekable stream, where bytes have to be read and
-    // thrown away rather than seeked past.
-    private byte[]? _discardBuffer;
+    // End of the outermost open document, or -1 when none is open. No read crosses it, so a
+    // stream holding several documents in sequence stays readable one document at a time.
+    private long _readLimit = -1;
 
-    // When the input is backed by a byte[], we keep a direct reference so binary
-    // reads can return a ReadOnlyMemory<byte> slice without copying.
-    private readonly byte[]? _sourceBuffer;
-    private readonly int _sourceOffset;
+    private bool _disposed;
 
     private struct DocumentContext
     {
@@ -44,32 +65,37 @@ internal sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDispo
         public bool IsArray;
     }
 
-    public BsonReader(byte[] data) : this(new MemoryStream(data, writable: false), leaveOpen: false)
+    public BsonReader(Stream stream, bool leaveOpen = false)
     {
-        _sourceBuffer = data ?? throw new ArgumentNullException(nameof(data));
-        _sourceOffset = 0;
+        _stream = stream ?? throw new ArgumentNullException(nameof(stream));
+        _leaveOpen = leaveOpen;
+        _canSeek = stream.CanSeek;
+        _buffer = ArrayPool<byte>.Shared.Rent(WindowSize);
+        _bufferIsSource = false;
+    }
+
+    public BsonReader(byte[] data)
+        : this(new ReadOnlyMemory<byte>(data ?? throw new ArgumentNullException(nameof(data))))
+    {
     }
 
     public BsonReader(ReadOnlyMemory<byte> data)
-        : this(CreateMemoryStream(data, out var buffer, out var offset), leaveOpen: false)
-    {
-        _sourceBuffer = buffer;
-        _sourceOffset = offset;
-    }
-
-    private static MemoryStream CreateMemoryStream(ReadOnlyMemory<byte> data, out byte[] buffer, out int offset)
     {
         if (MemoryMarshal.TryGetArray(data, out ArraySegment<byte> segment) && segment.Array is not null)
         {
-            buffer = segment.Array;
-            offset = segment.Offset;
-            return new MemoryStream(segment.Array, segment.Offset, segment.Count, writable: false);
+            _buffer = segment.Array;
+            _start = segment.Offset;
+            _end = segment.Offset + segment.Count;
+        }
+        else
+        {
+            _buffer = data.ToArray();
+            _start = 0;
+            _end = _buffer.Length;
         }
 
-        var copy = data.ToArray();
-        buffer = copy;
-        offset = 0;
-        return new MemoryStream(copy, 0, copy.Length, writable: false);
+        _bufferIsSource = true;
+        _leaveOpen = true;
     }
 
     /// <summary>
@@ -90,12 +116,7 @@ internal sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDispo
     /// <summary>
     /// Reads the start of a document. Must be called before reading elements.
     /// </summary>
-    public void ReadStartDocument()
-    {
-        var length = ReadInt32Core();
-        var endPosition = _position + length - 4; // -4 because length includes itself
-        _contextStack.Push(new DocumentContext { EndPosition = endPosition, IsArray = false });
-    }
+    public void ReadStartDocument() => PushDocument(isArray: false);
 
     /// <summary>
     /// Reads the end of a document.
@@ -104,15 +125,42 @@ internal sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDispo
     {
         if (_contextStack.Count == 0)
             throw new InvalidOperationException("No document to end.");
-        
+
         var context = _contextStack.Pop();
-        
+
         // Skip to end position if not already there (handles skipped fields)
         Advance(context.EndPosition - 1 - _position);
-        
+
         var endMarker = ReadByteCore();
         if (endMarker != 0)
             throw new InvalidDataException($"Expected end of document marker (0x00), got 0x{endMarker:X2}");
+
+        // Out of the outermost document, so the next one gets to declare its own extent.
+        if (_contextStack.Count == 0)
+            _readLimit = -1;
+    }
+
+    /// <summary>
+    /// Reads a document's length prefix and opens a context for it.
+    /// </summary>
+    private void PushDocument(bool isArray)
+    {
+        var length = ReadLengthCore(BsonSize.DocumentOverhead, "A document");
+        var endPosition = _position + length - 4; // -4 because length includes itself
+
+        if (_contextStack.Count == 0)
+        {
+            _readLimit = endPosition;
+        }
+        else if (endPosition > _contextStack.Peek().EndPosition)
+        {
+            // Left unchecked, an overlong nested length would let reads and skips inside it
+            // run past the enclosing document and misread whatever follows.
+            throw new InvalidDataException(
+                $"A nested document declares {length} bytes, which does not fit in the document containing it.");
+        }
+
+        _contextStack.Push(new DocumentContext { EndPosition = endPosition, IsArray = isArray });
     }
 
     /// <summary>
@@ -124,7 +172,7 @@ internal sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDispo
             throw new InvalidOperationException("Not inside a document. Call ReadStartDocument() first.");
 
         var context = _contextStack.Peek();
-        
+
         // Check if we're at the end of document
         if (_position >= context.EndPosition - 1)
         {
@@ -134,7 +182,7 @@ internal sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDispo
         }
 
         CurrentType = (BsonType)ReadByteCore();
-        
+
         if (CurrentType == 0) // End of document marker
         {
             CurrentName = string.Empty;
@@ -224,7 +272,7 @@ internal sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDispo
     public byte[] ReadObjectId()
     {
         EnsureType(BsonType.ObjectId);
-        return ReadBytesCore(12);
+        return Take(BsonSize.ObjectId).ToArray();
     }
 
     /// <summary>
@@ -233,18 +281,10 @@ internal sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDispo
     public void ReadObjectId(Span<byte> destination)
     {
         EnsureType(BsonType.ObjectId);
-        if (destination.Length < 12)
-            throw new ArgumentException("Destination must be at least 12 bytes.", nameof(destination));
+        if (destination.Length < BsonSize.ObjectId)
+            throw new ArgumentException($"Destination must be at least {BsonSize.ObjectId} bytes.", nameof(destination));
 
-        if (_sourceBuffer is not null)
-        {
-            var start = _sourceOffset + (int)_position;
-            new ReadOnlySpan<byte>(_sourceBuffer, start, 12).CopyTo(destination);
-            Advance(12);
-            return;
-        }
-
-        ReadBytesCore(12).CopyTo(destination);
+        Take(BsonSize.ObjectId).CopyTo(destination);
     }
 
     /// <summary>
@@ -253,13 +293,13 @@ internal sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDispo
     public (byte[] Data, BsonBinarySubType SubType) ReadBinary()
     {
         EnsureType(BsonType.Binary);
-        var length = ReadInt32Core();
+        var length = ReadLengthCore(0, "A binary value");
         var subType = (BsonBinarySubType)ReadByteCore();
 
         // Handle old binary subtype that has an extra length prefix
         if (subType == BsonBinarySubType.BinaryOld)
         {
-            var innerLength = ReadInt32Core();
+            var innerLength = ReadLengthCore(0, "A binary value");
             return (ReadBytesCore(innerLength), subType);
         }
 
@@ -276,20 +316,24 @@ internal sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDispo
     public (ReadOnlyMemory<byte> Data, BsonBinarySubType SubType) ReadBinaryAsMemory()
     {
         EnsureType(BsonType.Binary);
-        var length = ReadInt32Core();
+        var length = ReadLengthCore(0, "A binary value");
         var subType = (BsonBinarySubType)ReadByteCore();
 
         var dataLength = length;
         if (subType == BsonBinarySubType.BinaryOld)
         {
-            dataLength = ReadInt32Core();
+            dataLength = ReadLengthCore(0, "A binary value");
         }
 
-        if (_sourceBuffer is not null)
+        if (_bufferIsSource)
         {
-            var startInBuffer = _sourceOffset + (int)_position;
-            var slice = new ReadOnlyMemory<byte>(_sourceBuffer, startInBuffer, dataLength);
-            Advance(dataLength);
+            EnsureWithinDocument(dataLength);
+            if (dataLength > _end - _start)
+                throw new EndOfStreamException($"Expected {dataLength} bytes but the input ended after {_end - _start}.");
+
+            var slice = new ReadOnlyMemory<byte>(_buffer, _start, dataLength);
+            _start += dataLength;
+            _position += dataLength;
             return (slice, subType);
         }
 
@@ -329,23 +373,28 @@ internal sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDispo
 
     private string ReadLengthPrefixedString()
     {
-        var length = ReadInt32Core(); // includes null terminator
-        if (_sourceBuffer is not null)
+        // The declared length covers the value and its terminator.
+        var valueLength = ReadLengthCore(1, "A string") - 1;
+
+        // Decoded straight out of the window when it fits, which is the common case: the
+        // alternative copies the bytes into an array only to throw it away.
+        if (valueLength <= _end - _start || (_stream is not null && valueLength <= _buffer.Length))
         {
-            var start = _sourceOffset + (int)_position;
-            var valueSpan = new ReadOnlySpan<byte>(_sourceBuffer, start, length - 1);
-#if NET6_0_OR_GREATER
-            var result = Encoding.UTF8.GetString(valueSpan);
-#else
-            var result = Encoding.UTF8.GetString(valueSpan.ToArray());
-#endif
-            Advance(length); // skip value + null terminator
-            return result;
+            var value = DecodeString(Take(valueLength));
+            ExpectStringTerminator();
+            return value;
         }
 
-        var bytes = ReadBytesCore(length - 1);
-        ReadByteCore(); // null terminator
-        return Encoding.UTF8.GetString(bytes);
+        var bytes = ReadBytesCore(valueLength);
+        ExpectStringTerminator();
+        return Encoding.UTF8.GetString(bytes, 0, bytes.Length);
+    }
+
+    private void ExpectStringTerminator()
+    {
+        var terminator = ReadByteCore();
+        if (terminator != 0)
+            throw new InvalidDataException($"Expected a string terminator (0x00), got 0x{terminator:X2}.");
     }
 
     /// <summary>
@@ -365,9 +414,7 @@ internal sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDispo
     public void ReadStartNestedDocument()
     {
         EnsureType(BsonType.Document);
-        var length = ReadInt32Core();
-        var endPosition = _position + length - 4;
-        _contextStack.Push(new DocumentContext { EndPosition = endPosition, IsArray = false });
+        PushDocument(isArray: false);
     }
 
     /// <summary>
@@ -376,9 +423,7 @@ internal sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDispo
     public void ReadStartArray()
     {
         EnsureType(BsonType.Array);
-        var length = ReadInt32Core();
-        var endPosition = _position + length - 4;
-        _contextStack.Push(new DocumentContext { EndPosition = endPosition, IsArray = true });
+        PushDocument(isArray: true);
     }
 
     /// <summary>
@@ -397,20 +442,20 @@ internal sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDispo
             case BsonType.String:
             case BsonType.JavaScript:
             case BsonType.Symbol:
-                var stringLength = ReadInt32Core();
+                var stringLength = ReadLengthCore(1, "A string");
                 Advance(stringLength);
                 break;
             case BsonType.Document:
             case BsonType.Array:
-                var docLength = ReadInt32Core();
+                var docLength = ReadLengthCore(BsonSize.DocumentOverhead, "A document");
                 Advance(docLength - 4);
                 break;
             case BsonType.Binary:
-                var binLength = ReadInt32Core();
+                var binLength = ReadLengthCore(0, "A binary value");
                 Advance(1 + binLength); // subtype + data
                 break;
             case BsonType.ObjectId:
-                Advance(12);
+                Advance(BsonSize.ObjectId);
                 break;
             case BsonType.Boolean:
                 Advance(1);
@@ -429,7 +474,7 @@ internal sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDispo
                 Advance(4);
                 break;
             case BsonType.JavaScriptWithScope:
-                var scopeLength = ReadInt32Core();
+                var scopeLength = ReadLengthCore(JavaScriptWithScopeOverhead, "A JavaScript-with-scope value");
                 Advance(scopeLength - 4);
                 break;
             case BsonType.Decimal128:
@@ -491,27 +536,81 @@ internal sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDispo
         return list;
     }
 
+    /// <summary>
+    /// Reads a null-terminated string. The terminator is normally already in the window, so
+    /// the whole name is decoded from one span.
+    /// </summary>
     private string ReadCString()
     {
-        if (_sourceBuffer is not null)
+        var available = _end - _start;
+        if (available > 0)
         {
-            var start = _sourceOffset + (int)_position;
-            var span = new ReadOnlySpan<byte>(_sourceBuffer, start, _sourceBuffer.Length - start);
-            var nullIdx = span.IndexOf((byte)0);
-            if (nullIdx < 0)
-                throw new InvalidDataException("Unterminated cstring.");
-
-            var valueSpan = span.Slice(0, nullIdx);
-#if NET6_0_OR_GREATER
-            var result = Encoding.UTF8.GetString(valueSpan);
-#else
-            var result = Encoding.UTF8.GetString(valueSpan.ToArray());
-#endif
-            Advance(nullIdx + 1); // skip past null terminator
-            return result;
+            var index = new ReadOnlySpan<byte>(_buffer, _start, available).IndexOf((byte)0);
+            if (index >= 0)
+            {
+                EnsureWithinDocument(index + 1);
+                var value = DecodeString(new ReadOnlySpan<byte>(_buffer, _start, index));
+                _start += index + 1; // skip past null terminator
+                _position += index + 1;
+                return value;
+            }
         }
 
-        return ReadCStringFromStream();
+        if (_stream is null)
+            throw new InvalidDataException("Unterminated cstring.");
+
+        return ReadCStringAcrossRefills();
+    }
+
+    /// <summary>
+    /// The rest of a cstring whose terminator was not in the window, accumulated across
+    /// refills.
+    /// </summary>
+    private string ReadCStringAcrossRefills()
+    {
+        var scratch = ArrayPool<byte>.Shared.Rent(128);
+        var length = 0;
+        try
+        {
+            while (true)
+            {
+                var available = _end - _start;
+                if (available == 0)
+                {
+                    FillAtLeast(1); // Throws rather than returning an unterminated name.
+                    continue;
+                }
+
+                var index = new ReadOnlySpan<byte>(_buffer, _start, available).IndexOf((byte)0);
+                var take = index >= 0 ? index : available;
+
+                EnsureWithinDocument(index >= 0 ? take + 1 : take);
+
+                if (length + take > scratch.Length)
+                {
+                    var larger = ArrayPool<byte>.Shared.Rent(Math.Max(scratch.Length * 2, length + take));
+                    Buffer.BlockCopy(scratch, 0, larger, 0, length);
+                    ArrayPool<byte>.Shared.Return(scratch, clearArray: true);
+                    scratch = larger;
+                }
+
+                Buffer.BlockCopy(_buffer, _start, scratch, length, take);
+                length += take;
+                _start += take;
+                _position += take;
+
+                if (index >= 0)
+                {
+                    _start++; // null terminator
+                    _position++;
+                    return Encoding.UTF8.GetString(scratch, 0, length);
+                }
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(scratch, clearArray: true);
+        }
     }
 
     private void EnsureType(BsonType expected)
@@ -534,50 +633,176 @@ internal sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDispo
 
     private static readonly DateTime UnixEpoch = new(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
 
+    private static string DecodeString(ReadOnlySpan<byte> value)
+    {
+#if NET6_0_OR_GREATER
+        return Encoding.UTF8.GetString(value);
+#else
+        return value.IsEmpty ? string.Empty : Encoding.UTF8.GetString(value.ToArray());
+#endif
+    }
+
     // Read primitives. Everything this reader consumes goes through one of these so the
     // logical position stays accurate without asking the stream where it is.
 
     private byte ReadByteCore()
     {
-        _position += 1;
-        return _reader.ReadByte();
+        EnsureBuffered(1);
+        EnsureWithinDocument(1);
+
+        var value = _buffer[_start++];
+        _position++;
+        return value;
     }
 
-    private int ReadInt32Core()
-    {
-        _position += 4;
-        return _reader.ReadInt32();
-    }
+    private int ReadInt32Core() => BinaryPrimitives.ReadInt32LittleEndian(Take(4));
 
-    private uint ReadUInt32Core()
-    {
-        _position += 4;
-        return _reader.ReadUInt32();
-    }
+    private uint ReadUInt32Core() => BinaryPrimitives.ReadUInt32LittleEndian(Take(4));
 
-    private long ReadInt64Core()
-    {
-        _position += 8;
-        return _reader.ReadInt64();
-    }
+    private long ReadInt64Core() => BinaryPrimitives.ReadInt64LittleEndian(Take(8));
 
-    private double ReadDoubleCore()
+    // Raw bits keep this little-endian on either endianness, matching BsonWriter.
+    private double ReadDoubleCore() => BitConverter.Int64BitsToDouble(ReadInt64Core());
+
+    /// <summary>
+    /// Reads a length prefix and rejects one no valid value could carry, so a corrupt length
+    /// fails here rather than silently misaligning everything that follows.
+    /// </summary>
+    private int ReadLengthCore(int minimum, string what)
     {
-        _position += 8;
-        return _reader.ReadDouble();
+        var length = ReadInt32Core();
+        if (length < minimum)
+        {
+            throw new InvalidDataException(
+                $"{what} declares a length of {length} bytes; the minimum is {minimum}.");
+        }
+
+        return length;
     }
 
     private byte[] ReadBytesCore(int count)
     {
-        var bytes = _reader.ReadBytes(count);
-        _position += bytes.Length;
+        if (count == 0)
+            return [];
 
-        // BinaryReader returns a short array at end of stream rather than throwing, which
-        // would otherwise surface as a silently wrong value.
-        if (bytes.Length != count)
-            throw new EndOfStreamException($"Expected {count} bytes but the input ended after {bytes.Length}.");
-
+        var bytes = new byte[count];
+        ReadExact(bytes, 0, count);
         return bytes;
+    }
+
+    /// <summary>
+    /// Fills a caller-owned buffer from the window and then, for anything left, straight from
+    /// the stream: a payload larger than the window is never staged through it.
+    /// </summary>
+    private void ReadExact(byte[] destination, int offset, int count)
+    {
+        EnsureWithinDocument(count);
+
+        var buffered = Math.Min(count, _end - _start);
+        if (buffered > 0)
+        {
+            Buffer.BlockCopy(_buffer, _start, destination, offset, buffered);
+            _start += buffered;
+            _position += buffered;
+            offset += buffered;
+            count -= buffered;
+        }
+
+        while (count > 0)
+        {
+            if (_stream is null)
+                throw new EndOfStreamException($"Expected {count} more bytes but the input ended.");
+
+            var read = _stream.Read(destination, offset, count);
+            if (read <= 0)
+                throw new EndOfStreamException($"Expected {count} more bytes but the input ended.");
+
+            _position += read;
+            offset += read;
+            count -= read;
+        }
+    }
+
+    /// <summary>
+    /// Consumes <paramref name="count"/> contiguous bytes from the window. Only for values no
+    /// larger than the window; bulk payloads go through <see cref="ReadExact"/>.
+    /// </summary>
+    private ReadOnlySpan<byte> Take(int count)
+    {
+        EnsureBuffered(count);
+        EnsureWithinDocument(count);
+
+        var span = new ReadOnlySpan<byte>(_buffer, _start, count);
+        _start += count;
+        _position += count;
+        return span;
+    }
+
+    private void EnsureBuffered(int count)
+    {
+        if (_end - _start < count)
+            FillAtLeast(count);
+    }
+
+    private void FillAtLeast(int minimum)
+    {
+        EnsureWithinDocument(minimum);
+
+        if (_stream is null)
+            throw new EndOfStreamException($"Expected {minimum} bytes but the input ended after {_end - _start}.");
+
+        // Refills start from the front, so the window can hold `minimum` contiguous bytes
+        // however far into it the reader had already got.
+        var available = _end - _start;
+        if (_start > 0)
+        {
+            if (available > 0)
+                Buffer.BlockCopy(_buffer, _start, _buffer, 0, available);
+
+            _start = 0;
+            _end = available;
+        }
+
+        var target = RefillTarget(minimum);
+
+        while (_end < minimum)
+        {
+            var read = _stream.Read(_buffer, _end, target - _end);
+            if (read <= 0)
+                throw new EndOfStreamException($"Expected {minimum} bytes but the input ended after {_end}.");
+
+            _end += read;
+        }
+    }
+
+    /// <summary>
+    /// How full to try to make the window. Read-ahead stops at the end of the outermost open
+    /// document, so bytes belonging to whatever follows it on the stream are never consumed —
+    /// and a peer that sends one document and then waits is never read into.
+    /// </summary>
+    private int RefillTarget(int minimum)
+    {
+        // Nothing open, so nothing bounds a read-ahead: take exactly what was asked for.
+        if (_readLimit < 0)
+            return minimum;
+
+        var remaining = _readLimit - (_position + _end); // _start is 0 by the time this runs
+        var target = _end + (int)Math.Min(remaining, _buffer.Length - _end);
+        return target < minimum ? minimum : target;
+    }
+
+    /// <summary>
+    /// Rejects a read that would run past the outermost open document. Malformed lengths are
+    /// the only way to get here, and consuming those bytes would corrupt whatever follows.
+    /// </summary>
+    private void EnsureWithinDocument(long count)
+    {
+        if (_readLimit >= 0 && _position + count > _readLimit)
+        {
+            throw new InvalidDataException(
+                $"Reading {count} bytes at position {_position} would run " +
+                $"{_position + count - _readLimit} bytes past the end of the document.");
+        }
     }
 
     /// <summary>
@@ -586,8 +811,30 @@ internal sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDispo
     /// </summary>
     private void Advance(long count)
     {
-        if (count <= 0)
+        if (count == 0)
             return;
+
+        if (count < 0)
+        {
+            // Only a corrupt length prefix gets here. Returning silently would leave the
+            // reader short of where it thinks it is and parse the remainder as garbage.
+            throw new InvalidDataException(
+                $"A declared length would move the reader {-count} bytes backwards. The input is malformed.");
+        }
+
+        EnsureWithinDocument(count);
+
+        // Buffered bytes first: the stream is already past them.
+        var buffered = (int)Math.Min(count, _end - _start);
+        _start += buffered;
+        _position += buffered;
+        count -= buffered;
+
+        if (count == 0)
+            return;
+
+        if (_stream is null)
+            throw new EndOfStreamException($"Expected {count} more bytes but the input ended.");
 
         if (_canSeek)
         {
@@ -596,13 +843,15 @@ internal sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDispo
             return;
         }
 
-        // Nothing to seek with, so the bytes have to be consumed and dropped.
-        _discardBuffer ??= ArrayPool<byte>.Shared.Rent(4096);
+        // Nothing to seek with, so the bytes have to be consumed and dropped. The window is
+        // empty by now, so it doubles as the discard buffer.
+        _start = 0;
+        _end = 0;
 
         while (count > 0)
         {
-            var chunk = (int)Math.Min(count, _discardBuffer.Length);
-            var read = _stream.Read(_discardBuffer, 0, chunk);
+            var chunk = (int)Math.Min(count, _buffer.Length);
+            var read = _stream.Read(_buffer, 0, chunk);
             if (read <= 0)
                 throw new EndOfStreamException($"Expected {count} more bytes but the input ended.");
 
@@ -611,49 +860,43 @@ internal sealed class BsonReader(Stream stream, bool leaveOpen = false) : IDispo
         }
     }
 
-    /// <summary>
-    /// Reads a cstring one byte at a time. A non-seekable stream cannot be rewound, so the
-    /// terminator cannot be found by scanning ahead.
-    /// </summary>
-    private string ReadCStringFromStream()
-    {
-        var scratch = ArrayPool<byte>.Shared.Rent(128);
-        try
-        {
-            var length = 0;
-            byte b;
-            while ((b = ReadByteCore()) != 0)
-            {
-                if (length == scratch.Length)
-                {
-                    var larger = ArrayPool<byte>.Shared.Rent(scratch.Length * 2);
-                    Buffer.BlockCopy(scratch, 0, larger, 0, length);
-                    ArrayPool<byte>.Shared.Return(scratch);
-                    scratch = larger;
-                }
-
-                scratch[length++] = b;
-            }
-
-            return Encoding.UTF8.GetString(scratch, 0, length);
-        }
-        finally
-        {
-            ArrayPool<byte>.Shared.Return(scratch);
-        }
-    }
-
     public void Dispose()
     {
-        if (_discardBuffer is { } discard)
+        if (_disposed)
+            return;
+
+        _disposed = true;
+
+        var buffered = _end - _start;
+        _start = 0;
+        _end = 0;
+
+        var buffer = _buffer;
+        _buffer = [];
+
+        if (!_bufferIsSource)
         {
-            _discardBuffer = null;
-            ArrayPool<byte>.Shared.Return(discard);
+            // Cleared: the pool hands this array to the next renter as-is, and it still holds
+            // whatever was read through it.
+            ArrayPool<byte>.Shared.Return(buffer, clearArray: true);
         }
 
-        _reader.Dispose();
-        if (!leaveOpen)
+        if (_stream is null)
+            return;
+
+        if (!_leaveOpen)
+        {
             _stream.Dispose();
+            return;
+        }
+
+        // Read-ahead left the stream past what this reader actually consumed. Hand those
+        // bytes back, so a caller keeping the stream resumes where the reader stopped.
+        //
+        // The only place seekability is asked about twice. Everywhere else _canSeek decides
+        // alone, but disposal can run after the caller closed the stream underneath us, and
+        // rewinding one of those throws — out of a Dispose, over bytes nobody can read anyway.
+        if (buffered > 0 && _canSeek && _stream.CanSeek)
+            _stream.Position -= buffered;
     }
 }
-

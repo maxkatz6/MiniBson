@@ -1,4 +1,5 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Linq;
 using System.Text;
@@ -51,9 +52,23 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
     /// Identifies the member currently being emitted, so an unsupported type can be
     /// reported against it instead of silently emitting nothing.
     /// </summary>
-    private sealed record EmitScope(DiagnosticCollector Diagnostics, string MemberPath, LocationInfo? Location)
+    /// <param name="MemberPath">How the member is named to the user in a diagnostic.</param>
+    /// <param name="MethodPath">
+    /// How the member is named in generated identifiers. Distinct from
+    /// <paramref name="MemberPath"/> because that one uses simple type names, which two models
+    /// in different namespaces can share.
+    /// </param>
+    private sealed record EmitScope(
+        DiagnosticCollector Diagnostics,
+        string MemberPath,
+        string MethodPath,
+        LocationInfo? Location)
     {
-        public EmitScope Element() => this with { MemberPath = MemberPath + "[]" };
+        public EmitScope Element() => this with
+        {
+            MemberPath = MemberPath + "[]",
+            MethodPath = MethodPath + "_Element",
+        };
 
         /// <summary>
         /// Records a diagnostic and emits a runtime backstop, so the generated code stays
@@ -200,14 +215,14 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         sb.AppendLine($"{contextClass.Accessibility} partial class {contextClass.ClassName}");
         sb.AppendLine("{");
 
-        // Collect all types that need serialization (including nested types)
+        // Models reached through properties need methods too, so the registered types are only
+        // the roots of the walk.
         var allTypes = new Dictionary<string, TypeInfo>();
         foreach (var type in contextClass.SerializableTypes)
         {
             CollectAllTypes(type, allTypes);
         }
 
-        // Generate Write/Read/Measure methods for each type
         foreach (var type in allTypes.Values)
         {
             GenerateWriteMethod(sb, type, diagnostics);
@@ -218,15 +233,14 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
             sb.AppendLine();
         }
 
-        // Generate public Serialize method
+        // Only registered types are valid top-level values, so the public entry points dispatch
+        // over those rather than everything collected above.
         GenerateSerializeMethod(sb, contextClass.SerializableTypes);
         sb.AppendLine();
 
-        // Generate public Deserialize method
         GenerateDeserializeMethod(sb, contextClass.SerializableTypes);
         sb.AppendLine();
 
-        // Generate public GetSerializedSize method
         GenerateGetSerializedSizeMethod(sb, contextClass.SerializableTypes);
 
         // Runtime backstop for anything MINIBSON001 was reported for
@@ -278,12 +292,20 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
     /// <summary>Fully qualified so a user type named MiniBson cannot shadow it.</summary>
     private const string SizeType = "global::MiniBson.BsonSize";
 
+    /// <summary>Fully qualified so a user type named MiniBson cannot shadow it.</summary>
+    private const string SizeTableType = "global::MiniBson.BsonSizeTable";
+
     /// <summary>
-    /// Supplies a document length only when the writer cannot patch one in later; back-patching
-    /// is cheaper than measuring.
+    /// The size table both passes thread through. Named for collision resistance, not looks:
+    /// it shares scope with whatever the model declared.
     /// </summary>
-    private static string SizedFraming(string sizeExpression) =>
-        $"writer.RequiresKnownLength ? {sizeExpression} : 0";
+    private const string SizeTableParameter = "__sizes";
+
+    /// <summary>
+    /// The length to open a document with. Zero when the destination can be seeked, which the
+    /// writer reads as "patch it in later"; back-patching is cheaper than measuring.
+    /// </summary>
+    private const string SizedFraming = SizeTableParameter + ".Next()";
 
     /// <summary>
     /// Type byte plus null-terminated name. Names are known here, so this folds to a literal.
@@ -291,11 +313,13 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
     private static int ElementOverhead(string name) => 1 + Encoding.UTF8.GetByteCount(name) + 1;
 
     /// <summary>
-    /// Name of the generated helper that measures one array-typed member. Derived from the
-    /// member path so the write and measure emitters agree on it without coordinating.
+    /// Name of the generated helper that measures one array-typed member. Every such helper for
+    /// every model lands in one partial class, so this is built from
+    /// <see cref="EmitScope.MethodPath"/> rather than <see cref="EmitScope.MemberPath"/>: the
+    /// latter keeps simple type names, and two models sharing one would emit this helper twice.
     /// </summary>
     private static string ArrayMeasureMethodName(EmitScope scope) =>
-        "Measure" + scope.MemberPath.Replace(".", "_").Replace("+", "_") + "Array";
+        "Measure" + scope.MethodPath + "Array";
 
     /// <summary>
     /// The BSON representation a model type maps onto.
@@ -445,17 +469,29 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         // top-level writes share one definition.
         sb.AppendLine($"    private void Write{methodName}(BsonWriter writer, {typeName} instance)");
         sb.AppendLine("    {");
-        sb.AppendLine($"        writer.WriteStartDocument({SizedFraming($"{SizeType}.DocumentOverhead + Measure{methodName}Inner(instance)")});");
-        sb.AppendLine($"        Write{methodName}Inner(writer, instance);");
-        sb.AppendLine("        writer.WriteEndDocument();");
+        sb.AppendLine("        // One measuring walk for the whole graph, replayed below in the order the writer");
+        sb.AppendLine("        // asks for lengths. Skipped entirely when the writer can patch them in later.");
+        sb.AppendLine($"        var {SizeTableParameter} = {SizeTableType}.Rent(writer.RequiresKnownLength);");
+        sb.AppendLine("        try");
+        sb.AppendLine("        {");
+        sb.AppendLine($"            if ({SizeTableParameter}.IsActive)");
+        sb.AppendLine($"                Measure{methodName}(instance, {SizeTableParameter});");
+        sb.AppendLine();
+        sb.AppendLine($"            writer.WriteStartDocument({SizedFraming});");
+        sb.AppendLine($"            Write{methodName}Inner(writer, instance, {SizeTableParameter});");
+        sb.AppendLine("            writer.WriteEndDocument();");
+        sb.AppendLine("        }");
+        sb.AppendLine("        finally");
+        sb.AppendLine("        {");
+        sb.AppendLine($"            {SizeTableParameter}.Return();");
+        sb.AppendLine("        }");
         sb.AppendLine("    }");
         sb.AppendLine();
 
-        sb.AppendLine($"    private void Write{methodName}Inner(BsonWriter writer, {typeName} instance)");
+        sb.AppendLine($"    private void Write{methodName}Inner(BsonWriter writer, {typeName} instance, {SizeTableType} {SizeTableParameter})");
         sb.AppendLine("    {");
         sb.AppendLine("#nullable disable");
 
-        // Get all properties including inherited ones
         foreach (var property in type.Properties)
         {
             GenerateWriteProperty(sb, property.Name, property.Type, $"instance.{property.Name}",
@@ -467,14 +503,21 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
     }
 
     private static EmitScope ScopeFor(DiagnosticCollector diagnostics, TypeInfo type, PropertyInfo property) =>
-        new(diagnostics, $"{type.Name}.{property.Name}", property.Location);
+        new(
+            diagnostics,
+            $"{type.Name}.{property.Name}",
+            $"{GetSafeMethodName(type)}_{property.Name}",
+            property.Location);
 
     private static void GenerateWriteProperty(StringBuilder sb, string name, TypeRefInfo type, string accessor, EmitScope scope)
     {
         var isNullable = type.IsNullable;
         var underlyingType = type.NullableUnderlyingType ?? type;
 
-        if (isNullable && !type.IsValueType)
+        // Every reference is checked, annotated or not. A model compiled without nullable
+        // reference types still holds nulls, and there is no encoding of one as a string or a
+        // binary payload — measuring would report a document the writer then fails to produce.
+        if (!type.IsValueType)
         {
             sb.AppendLine($"        if ({accessor} is null)");
             sb.AppendLine($"            writer.WriteNull(\"{name}\");");
@@ -514,9 +557,7 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
                 return;
 
             case BsonMapping.Array:
-                // The measure emitter defines this helper; both sides derive the name from scope.
-                var arrayMeasure = $"{ArrayMeasureMethodName(scope)}({accessor})";
-                sb.AppendLine($"{indent}writer.WriteStartArray(\"{name}\", {SizedFraming(arrayMeasure)});");
+                sb.AppendLine($"{indent}writer.WriteStartArray(\"{name}\", {SizedFraming});");
                 sb.AppendLine($"{indent}foreach (var item in {accessor})");
                 sb.AppendLine($"{indent}{{");
                 GenerateWriteArrayElement(sb, mapping.ElementType!, "item", indent + "    ", scope.Element());
@@ -526,9 +567,8 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
 
             case BsonMapping.Nested:
                 var methodName = GetSafeMethodName(mapping.NestedType!);
-                var nestedMeasure = $"{SizeType}.DocumentOverhead + Measure{methodName}Inner({accessor})";
-                sb.AppendLine($"{indent}writer.WriteStartDocument(\"{name}\", {SizedFraming(nestedMeasure)});");
-                sb.AppendLine($"{indent}Write{methodName}Inner(writer, {accessor});");
+                sb.AppendLine($"{indent}writer.WriteStartDocument(\"{name}\", {SizedFraming});");
+                sb.AppendLine($"{indent}Write{methodName}Inner(writer, {accessor}, {SizeTableParameter});");
                 sb.AppendLine($"{indent}writer.WriteEndDocument();");
                 return;
 
@@ -547,7 +587,8 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         var isNullable = type.IsNullable;
         var underlyingType = type.NullableUnderlyingType ?? type;
 
-        if (isNullable && !type.IsValueType)
+        // Annotated or not; see GenerateWriteProperty.
+        if (!type.IsValueType)
         {
             sb.AppendLine($"{indent}if ({accessor} is null)");
             sb.AppendLine($"{indent}    writer.WriteNull();");
@@ -586,9 +627,8 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
 
             case BsonMapping.Nested:
                 var methodName = GetSafeMethodName(mapping.NestedType!);
-                var nestedMeasure = $"{SizeType}.DocumentOverhead + Measure{methodName}Inner({accessor})";
-                sb.AppendLine($"{indent}writer.WriteStartNestedDocument({SizedFraming(nestedMeasure)});");
-                sb.AppendLine($"{indent}Write{methodName}Inner(writer, {accessor});");
+                sb.AppendLine($"{indent}writer.WriteStartNestedDocument({SizedFraming});");
+                sb.AppendLine($"{indent}Write{methodName}Inner(writer, {accessor}, {SizeTableParameter});");
                 sb.AppendLine($"{indent}writer.WriteEndDocument();");
                 return;
 
@@ -616,26 +656,44 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         // Array members get helper methods, emitted after this one. Both sides call them.
         var helpers = new StringBuilder();
 
+        sb.AppendLine("    /// <summary>");
+        sb.AppendLine("    /// Encoded length of this type as a document, recording it and every document nested");
+        sb.AppendLine("    /// inside it in the order the write pass asks for them.");
+        sb.AppendLine("    /// </summary>");
+        sb.AppendLine($"    private static int Measure{methodName}({typeName} instance, {SizeTableType} {SizeTableParameter})");
+        sb.AppendLine("    {");
+        sb.AppendLine($"        var __slot = {SizeTableParameter}.Reserve();");
+        sb.AppendLine($"        var __size = {SizeType}.DocumentOverhead + Measure{methodName}Inner(instance, {SizeTableParameter});");
+        sb.AppendLine($"        {SizeTableParameter}.Record(__slot, __size);");
+        sb.AppendLine("        return __size;");
+        sb.AppendLine("    }");
+        sb.AppendLine();
+
         sb.AppendLine("    /// <summary>Encoded size of this type's elements, excluding framing.</summary>");
-        sb.AppendLine($"    private static int Measure{methodName}Inner({typeName} instance)");
+        sb.AppendLine($"    private static int Measure{methodName}Inner({typeName} instance, {SizeTableType} {SizeTableParameter})");
         sb.AppendLine("    {");
         sb.AppendLine("#nullable disable");
-        sb.AppendLine("        var __size = 0;");
+        // Checked: a size that wrapped would agree with nothing, and the writer would be told
+        // to open a document it cannot describe.
+        sb.AppendLine("        checked");
+        sb.AppendLine("        {");
+        sb.AppendLine("            var __size = 0;");
 
         foreach (var property in type.Properties)
         {
             GenerateMeasureProperty(sb, helpers, property.Name, property.Type, $"instance.{property.Name}",
-                ScopeFor(diagnostics, type, property));
+                "            ", ScopeFor(diagnostics, type, property));
         }
 
-        sb.AppendLine("        return __size;");
+        sb.AppendLine("            return __size;");
+        sb.AppendLine("        }");
         sb.AppendLine("#nullable restore");
         sb.AppendLine("    }");
 
         sb.Append(helpers);
     }
 
-    private static void GenerateMeasureProperty(StringBuilder sb, StringBuilder helpers, string name, TypeRefInfo type, string accessor, EmitScope scope)
+    private static void GenerateMeasureProperty(StringBuilder sb, StringBuilder helpers, string name, TypeRefInfo type, string accessor, string indent, EmitScope scope)
     {
         var isNullable = type.IsNullable;
         var underlyingType = type.NullableUnderlyingType ?? type;
@@ -643,27 +701,28 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         // WriteNull costs the element header and no value.
         var nullSize = ElementOverhead(name);
 
-        if (isNullable && !type.IsValueType)
+        // Annotated or not; see GenerateWriteProperty.
+        if (!type.IsValueType)
         {
-            sb.AppendLine($"        if ({accessor} is null)");
-            sb.AppendLine($"            __size += {nullSize};");
-            sb.AppendLine("        else");
-            sb.AppendLine("        {");
-            GenerateMeasureValue(sb, helpers, name, underlyingType, accessor, "            ", scope);
-            sb.AppendLine("        }");
+            sb.AppendLine($"{indent}if ({accessor} is null)");
+            sb.AppendLine($"{indent}    __size += {nullSize};");
+            sb.AppendLine($"{indent}else");
+            sb.AppendLine($"{indent}{{");
+            GenerateMeasureValue(sb, helpers, name, underlyingType, accessor, indent + "    ", scope);
+            sb.AppendLine($"{indent}}}");
         }
         else if (isNullable && type.IsValueType)
         {
-            sb.AppendLine($"        if ({accessor}.HasValue)");
-            sb.AppendLine("        {");
-            GenerateMeasureValue(sb, helpers, name, underlyingType, $"{accessor}.Value", "            ", scope);
-            sb.AppendLine("        }");
-            sb.AppendLine("        else");
-            sb.AppendLine($"            __size += {nullSize};");
+            sb.AppendLine($"{indent}if ({accessor}.HasValue)");
+            sb.AppendLine($"{indent}{{");
+            GenerateMeasureValue(sb, helpers, name, underlyingType, $"{accessor}.Value", indent + "    ", scope);
+            sb.AppendLine($"{indent}}}");
+            sb.AppendLine($"{indent}else");
+            sb.AppendLine($"{indent}    __size += {nullSize};");
         }
         else
         {
-            GenerateMeasureValue(sb, helpers, name, underlyingType, accessor, "        ", scope);
+            GenerateMeasureValue(sb, helpers, name, underlyingType, accessor, indent, scope);
         }
     }
 
@@ -685,7 +744,7 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
             case BsonMapping.Array:
                 var helperName = ArrayMeasureMethodName(scope);
                 GenerateArrayMeasureHelper(helpers, helperName, type, mapping.ElementType!, scope.Element());
-                Add($"{helperName}({accessor})");
+                Add($"{helperName}({accessor}, {SizeTableParameter})");
                 return;
 
             case BsonMapping.String:
@@ -694,7 +753,7 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
 
             case BsonMapping.Nested:
                 var methodName = GetSafeMethodName(mapping.NestedType!);
-                Add($"{SizeType}.DocumentOverhead + Measure{methodName}Inner({accessor})");
+                Add($"Measure{methodName}({accessor}, {SizeTableParameter})");
                 return;
 
             case BsonMapping.Unsupported:
@@ -715,16 +774,21 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
     {
         helpers.AppendLine();
         helpers.AppendLine("    /// <summary>Encoded length of this array, framing and keys included.</summary>");
-        helpers.AppendLine($"    private static int {methodName}({arrayType.FullyQualifiedName} value)");
+        helpers.AppendLine($"    private static int {methodName}({arrayType.FullyQualifiedName} value, {SizeTableType} {SizeTableParameter})");
         helpers.AppendLine("    {");
         helpers.AppendLine("#nullable disable");
-        // Type bytes and index keys are counted in bulk, so the emitters below add only values.
-        helpers.AppendLine($"        var __size = {SizeType}.ArrayOverhead(value.Length);");
-        helpers.AppendLine("        foreach (var item in value)");
+        helpers.AppendLine("        checked");
         helpers.AppendLine("        {");
-        GenerateMeasureArrayElement(helpers, elementType, "item", "            ", elementScope);
+        helpers.AppendLine($"            var __slot = {SizeTableParameter}.Reserve();");
+        // Type bytes and index keys are counted in bulk, so the emitters below add only values.
+        helpers.AppendLine($"            var __size = {SizeType}.ArrayOverhead(value.Length);");
+        helpers.AppendLine("            foreach (var item in value)");
+        helpers.AppendLine("            {");
+        GenerateMeasureArrayElement(helpers, elementType, "item", "                ", elementScope);
+        helpers.AppendLine("            }");
+        helpers.AppendLine($"            {SizeTableParameter}.Record(__slot, __size);");
+        helpers.AppendLine("            return __size;");
         helpers.AppendLine("        }");
-        helpers.AppendLine("        return __size;");
         helpers.AppendLine("#nullable restore");
         helpers.AppendLine("    }");
     }
@@ -735,7 +799,8 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         var underlyingType = type.NullableUnderlyingType ?? type;
 
         // A null element's header is already counted by ArrayOverhead, so there is no else.
-        if (isNullable && !type.IsValueType)
+        // Annotated or not; see GenerateWriteProperty.
+        if (!type.IsValueType)
         {
             sb.AppendLine($"{indent}if ({accessor} is not null)");
             sb.AppendLine($"{indent}{{");
@@ -775,7 +840,7 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
 
             case BsonMapping.Nested:
                 var methodName = GetSafeMethodName(mapping.NestedType!);
-                Add($"{SizeType}.DocumentOverhead + Measure{methodName}Inner({accessor})");
+                Add($"Measure{methodName}({accessor}, {SizeTableParameter})");
                 return;
 
             // ReadOnlyMemory<byte> has no name-less write overload.
@@ -1062,24 +1127,17 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         sb.AppendLine("    /// </remarks>");
         sb.AppendLine("    public int GetSerializedSize(object input)");
         sb.AppendLine("    {");
+        sb.AppendLine("        if (input is null) throw new ArgumentNullException(nameof(input));");
         sb.AppendLine("        var inputType = input.GetType();");
 
-        var firstSize = true;
-        foreach (var type in types)
-        {
-            var typeName = type.FullyQualifiedName;
-            var methodName = GetSafeMethodName(type);
+        // BsonSizeTable.None measures without recording: nothing is going to replay it.
+        EmitTypeDispatch(
+            sb,
+            types,
+            "inputType",
+            type => $"return Measure{GetSafeMethodName(type)}(({type.FullyQualifiedName})input, {SizeTableType}.None);",
+            "serialization");
 
-            sb.AppendLine(firstSize
-                ? $"        if (inputType == typeof({typeName}))"
-                : $"        else if (inputType == typeof({typeName}))");
-            firstSize = false;
-
-            sb.AppendLine($"            return {SizeType}.DocumentOverhead + Measure{methodName}Inner(({typeName})input);");
-        }
-
-        sb.AppendLine("        else");
-        sb.AppendLine("            throw new NotSupportedException($\"Type {input.GetType()} is not supported for serialization.\");");
         sb.AppendLine("    }");
     }
 
@@ -1090,29 +1148,17 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         sb.AppendLine("    /// </summary>");
         sb.AppendLine("    public void Serialize(object input, BsonWriter writer)");
         sb.AppendLine("    {");
+        sb.AppendLine("        if (input is null) throw new ArgumentNullException(nameof(input));");
+        sb.AppendLine("        if (writer is null) throw new ArgumentNullException(nameof(writer));");
         sb.AppendLine("        var inputType = input.GetType();");
 
-        var first = true;
-        foreach (var type in types)
-        {
-            var typeName = type.FullyQualifiedName;
-            var methodName = GetSafeMethodName(type);
+        EmitTypeDispatch(
+            sb,
+            types,
+            "inputType",
+            type => $"Write{GetSafeMethodName(type)}(writer, ({type.FullyQualifiedName})input);",
+            "serialization");
 
-            if (first)
-            {
-                sb.AppendLine($"        if (inputType == typeof({typeName}))");
-                first = false;
-            }
-            else
-            {
-                sb.AppendLine($"        else if (inputType == typeof({typeName}))");
-            }
-
-            sb.AppendLine($"            Write{methodName}(writer, ({typeName})input);");
-        }
-
-        sb.AppendLine("        else");
-        sb.AppendLine("            throw new NotSupportedException($\"Type {input.GetType()} is not supported for serialization.\");");
         sb.AppendLine("    }");
     }
 
@@ -1123,29 +1169,49 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         sb.AppendLine("    /// </summary>");
         sb.AppendLine("    public object? Deserialize(BsonReader reader, Type type)");
         sb.AppendLine("    {");
+        sb.AppendLine("        if (reader is null) throw new ArgumentNullException(nameof(reader));");
+        sb.AppendLine("        if (type is null) throw new ArgumentNullException(nameof(type));");
 
+        EmitTypeDispatch(
+            sb,
+            types,
+            "type",
+            type => $"return Read{GetSafeMethodName(type)}(reader);",
+            "deserialization");
+
+        sb.AppendLine("    }");
+    }
+
+    /// <summary>
+    /// Emits the if/else chain matching a runtime type against every registered model. All
+    /// three public entry points dispatch identically, so they share this rather than each
+    /// carrying its own copy of the shape — and of whatever is wrong with it.
+    /// </summary>
+    /// <param name="selector">
+    /// Expression yielding the <c>Type</c> to match, also used to name it in the failure message.
+    /// </param>
+    /// <param name="body">Statement to emit for a matched model.</param>
+    private static void EmitTypeDispatch(
+        StringBuilder sb,
+        EquatableList<TypeInfo> types,
+        string selector,
+        Func<TypeInfo, string> body,
+        string operation)
+    {
         var first = true;
         foreach (var type in types)
         {
-            var typeName = type.FullyQualifiedName;
-            var methodName = GetSafeMethodName(type);
-
-            if (first)
-            {
-                sb.AppendLine($"        if (type == typeof({typeName}))");
-                first = false;
-            }
-            else
-            {
-                sb.AppendLine($"        else if (type == typeof({typeName}))");
-            }
-
-            sb.AppendLine($"            return Read{methodName}(reader);");
+            sb.AppendLine($"        {(first ? "if" : "else if")} ({selector} == typeof({type.FullyQualifiedName}))");
+            sb.AppendLine($"            {body(type)}");
+            first = false;
         }
 
-        sb.AppendLine();
-        sb.AppendLine("        throw new NotSupportedException($\"Type {type} is not supported for deserialization.\");");
-        sb.AppendLine("    }");
+        // A context registering no types still has to compile, so the throw stands alone.
+        var indent = first ? "        " : "            ";
+        if (!first)
+            sb.AppendLine("        else");
+
+        sb.AppendLine($"{indent}throw new NotSupportedException($\"Type {{{selector}}} is not supported for {operation}.\");");
     }
 
     private static IEnumerable<IPropertySymbol> GetAllProperties(INamedTypeSymbol type)
@@ -1186,10 +1252,20 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         return properties;
     }
 
+    /// <summary>
+    /// Identifier fragment naming one model type in generated members. Built from the fully
+    /// qualified name, not the simple one: two models called <c>Order</c> in different
+    /// namespaces are both legal and would otherwise emit the same methods into one class.
+    /// </summary>
     private static string GetSafeMethodName(TypeInfo type)
     {
-        // Create a safe method name from the type name
-        return type.Name.Replace(".", "_").Replace("+", "_");
+        var name = Display(type.FullyQualifiedName);
+        var builder = new StringBuilder(name.Length);
+
+        foreach (var c in name)
+            builder.Append(char.IsLetterOrDigit(c) || c == '_' ? c : '_');
+
+        return builder.ToString();
     }
 
     private static TypeInfo ExtractTypeInfo(INamedTypeSymbol symbol, HashSet<INamedTypeSymbol>? visited = null)

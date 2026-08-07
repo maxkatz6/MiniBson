@@ -109,6 +109,7 @@ as properties return the same value when read twice; see
 - All public, readable instance properties are serialized under their C# names. Inherited properties are included; a derived property wins when a name is hidden.
 - Deserialization matches fields by name. Unknown fields are skipped, and missing fields retain their default values.
 - Enums are stored by numeric value. Renaming a member is safe; changing its value changes the wire format.
+- A null reference is written as BSON Null and read back as null, whether or not the property is annotated nullable. Nullable annotations do not affect the wire format.
 
 ### Streaming over non-seekable streams
 
@@ -144,7 +145,8 @@ properties.
 | Enums | Int32 or Int64, according to the underlying type |
 | One-dimensional arrays of supported values | Array |
 | Other classes and records | Nested document |
-| Nullable values and references | Their normal representation or Null |
+| Nullable values | Their normal representation or Null |
+| References | Their normal representation, or Null when the value is null |
 
 ### Model limitations
 
@@ -153,7 +155,6 @@ properties.
 - `decimal` is not supported because MiniBson has no Decimal128 mapping.
 - Non-record classes require an accessible parameterless constructor, and each discovered property must have a public `set` or `init` accessor.
 - Records must be purely positional: their constructor must accept every discovered property in generated order.
-- Two types with the same simple name can produce generated method-name collisions, even when their namespaces differ.
 - A serialization context must be a partial class. A non-partial context is currently ignored without a diagnostic.
 
 Unsupported members produce compiler error `MINIBSON001` at the affected property, for example:
@@ -283,7 +284,7 @@ than emitting a malformed document. `RequiresKnownLength` reports whether the de
 needs lengths supplied.
 
 Generated serializers handle all of this themselves — see
-[Streaming to non-seekable destinations](#streaming-to-non-seekable-destinations).
+[Streaming over non-seekable streams](#streaming-over-non-seekable-streams).
 
 `BsonReader` works over any stream. It tracks its own position rather than asking the
 stream, and skipping a value consumes those bytes when the stream cannot seek. A reader
@@ -292,9 +293,21 @@ sequence can be read one at a time.
 
 ### Buffering
 
-`BsonWriter` stages bytes in a fixed-size internal buffer, so written data does not reach
-the stream immediately. Call `Flush()`, or dispose the writer, before reading the
-destination. The buffer does not grow with document size.
+`BsonWriter` stages bytes in a fixed-size internal buffer rather than writing each value
+straight through. The buffer does not grow with document size, and payloads larger than it go
+directly to the stream.
+
+Closing a top-level document empties the buffer, so a finished document is always on the
+destination — reading a `MemoryStream` after `WriteEndDocument()` returns the whole document.
+Only a document still open is held back; `Flush()` publishes that.
+
+`Flush()` also flushes the underlying stream, and so does disposing the writer. That matters
+when the destination is wrapped in something with a buffer of its own, such as a
+`BufferedStream`, `GZipStream`, or `FileStream` the caller is keeping open.
+
+`BsonReader` buffers too, reading ahead into a pooled window. It never reads past the end of
+the document it is on, so a stream holding several documents in sequence stays readable one
+document at a time.
 
 ## Contributing
 

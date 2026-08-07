@@ -283,8 +283,12 @@ public sealed class BsonWriterBufferingTests
         AssertLengthPrefixMatches(ms.ToArray());
     }
 
+    /// <summary>
+    /// Staging is invisible from outside once a document closes. Callers wrote against that
+    /// before the buffer existed, and holding a finished document back breaks them silently.
+    /// </summary>
     [TestMethod]
-    public void FlushMakesBytesVisibleWithoutDisposing()
+    public void ClosingATopLevelDocumentPutsItOnTheStream()
     {
         using var ms = new MemoryStream();
         using var writer = new BsonWriter(ms, leaveOpen: true);
@@ -293,9 +297,173 @@ public sealed class BsonWriterBufferingTests
         writer.WriteInt32("value", 1);
         writer.WriteEndDocument();
 
-        Assert.AreEqual(0, ms.Length, "Small documents stay staged until flushed.");
+        AssertLengthPrefixMatches(ms.ToArray());
+    }
+
+    // A document still open is the one case staging is observable, which is what Flush is for.
+    [TestMethod]
+    public void FlushMakesAnUnfinishedDocumentVisible()
+    {
+        using var ms = new MemoryStream();
+        using var writer = new BsonWriter(ms, leaveOpen: true);
+
+        writer.WriteStartDocument();
+        writer.WriteInt32("value", 1);
+
+        Assert.AreEqual(0, ms.Length, "An open document stays staged.");
 
         writer.Flush();
-        AssertLengthPrefixMatches(ms.ToArray());
+        Assert.AreEqual(15, ms.Length, "Flush should publish the bytes written so far.");
+    }
+
+    /// <summary>
+    /// A wrapper holding its own buffer is the common shape for a file or a socket, and
+    /// nothing reaches the real destination unless the writer flushes it too.
+    /// </summary>
+    [TestMethod]
+    public void FlushReachesThroughABufferedStream()
+    {
+        using var sink = new MemoryStream();
+        using var buffered = new BufferedStream(sink, 4096);
+
+        using (var writer = new BsonWriter(buffered, leaveOpen: true))
+        {
+            writer.WriteStartDocument();
+            writer.WriteInt32("value", 1);
+            writer.WriteEndDocument();
+
+            writer.Flush();
+            AssertLengthPrefixMatches(sink.ToArray());
+        }
+
+        // And again through disposal, which is the other documented way to publish.
+        using (var writer = new BsonWriter(buffered, leaveOpen: true))
+        {
+            writer.WriteStartDocument();
+            writer.WriteInt32("second", 2);
+            writer.WriteEndDocument();
+        }
+
+        Assert.AreEqual(33, sink.Length, "Dispose should flush the wrapper as well.");
+    }
+
+    /// <summary>
+    /// A length the writer will not accept has to be rejected before the element header is
+    /// staged, or the document keeps an orphan header naming a value that never arrives.
+    /// </summary>
+    [TestMethod]
+    public void ARejectedLengthWritesNothing()
+    {
+        using var ms = new MemoryStream();
+        using var writer = new BsonWriter(ms, leaveOpen: true);
+
+        writer.WriteStartDocument();
+        writer.WriteInt32("before", 1);
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => writer.WriteStartArray("items", 3));
+        Assert.Throws<ArgumentOutOfRangeException>(() => writer.WriteStartDocument("sub", 3));
+
+        writer.WriteInt32("after", 2);
+        writer.WriteEndDocument();
+
+        using var reader = new BsonReader(ms.ToArray());
+        reader.ReadStartDocument();
+        Assert.IsTrue(reader.Read());
+        Assert.AreEqual("before", reader.CurrentName);
+        Assert.AreEqual(1, reader.ReadInt32());
+        Assert.IsTrue(reader.Read());
+        Assert.AreEqual("after", reader.CurrentName);
+        Assert.AreEqual(2, reader.ReadInt32());
+        Assert.IsFalse(reader.Read());
+        reader.ReadEndDocument();
+    }
+
+    // The rejected call must not consume the array index either, or every later key is off.
+    [TestMethod]
+    public void ARejectedLengthDoesNotConsumeAnArrayIndex()
+    {
+        using var ms = new MemoryStream();
+        using var writer = new BsonWriter(ms, leaveOpen: true);
+
+        writer.WriteStartDocument();
+        writer.WriteStartArray("items");
+        writer.WriteInt32(10);
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => writer.WriteStartNestedArray(3));
+        Assert.Throws<ArgumentOutOfRangeException>(() => writer.WriteStartNestedDocument(3));
+
+        writer.WriteInt32(11);
+        writer.WriteEndArray();
+        writer.WriteEndDocument();
+
+        using var reader = new BsonReader(ms.ToArray());
+        reader.ReadStartDocument();
+        Assert.IsTrue(reader.Read());
+        reader.ReadStartArray();
+
+        Assert.IsTrue(reader.Read());
+        Assert.AreEqual("0", reader.CurrentName);
+        Assert.AreEqual(10, reader.ReadInt32());
+        Assert.IsTrue(reader.Read());
+        Assert.AreEqual("1", reader.CurrentName);
+        Assert.AreEqual(11, reader.ReadInt32());
+        Assert.IsFalse(reader.Read());
+
+        reader.ReadEndDocument();
+        reader.ReadEndDocument();
+    }
+
+    /// <summary>
+    /// A length mismatch is recoverable in the sense that the caller sees an exception rather
+    /// than a bad document. What it must not do is leave the enclosing array counting from the
+    /// nested array's index.
+    /// </summary>
+    [TestMethod]
+    public void AnArrayLengthMismatchStillRestoresTheEnclosingIndex()
+    {
+        using var ms = new MemoryStream();
+        using var writer = new BsonWriter(ms, leaveOpen: true);
+
+        writer.WriteStartDocument();
+        writer.WriteStartArray("items");
+        writer.WriteInt32(10);                                    // key "0"
+
+        writer.WriteStartNestedArray(BsonSize.DocumentOverhead + 100); // key "1", wrong length
+        writer.WriteInt32(11);
+        Assert.Throws<InvalidOperationException>(() => writer.WriteEndArray());
+
+        writer.WriteInt32(12);                                    // must be key "2"
+        writer.Flush();
+
+        var bytes = ms.ToArray();
+        Assert.IsTrue(Contains(bytes, [0x10, (byte)'2', 0x00]), "The enclosing array should resume at index 2.");
+        Assert.IsFalse(Contains(bytes, [0x10, (byte)'1', 0x00]), "Index 1 was the nested array, not an int32.");
+    }
+
+    private static bool Contains(byte[] haystack, byte[] needle)
+    {
+        for (var i = 0; i + needle.Length <= haystack.Length; i++)
+        {
+            if (haystack.AsSpan(i, needle.Length).SequenceEqual(needle))
+                return true;
+        }
+
+        return false;
+    }
+
+    [TestMethod]
+    public void WritingAfterDisposeThrowsObjectDisposed()
+    {
+        using var ms = new MemoryStream();
+        var writer = new BsonWriter(ms, leaveOpen: true);
+        writer.WriteStartDocument();
+        writer.WriteEndDocument();
+        writer.Dispose();
+
+        // The pooled buffer is gone by now, so an unguarded write would fail somewhere inside
+        // the staging primitives instead of naming the mistake.
+        Assert.Throws<ObjectDisposedException>(() => writer.WriteInt32("value", 1));
+        Assert.Throws<ObjectDisposedException>(() => writer.WriteString("name", "value"));
+        Assert.Throws<ObjectDisposedException>(() => writer.Flush());
     }
 }
