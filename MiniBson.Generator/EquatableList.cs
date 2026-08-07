@@ -5,8 +5,8 @@ using System.Collections.ObjectModel;
 namespace MiniBson.Generator;
 
 /// <summary>
-/// A list with value equality, so a record holding one takes part in the incremental
-/// pipeline's cache comparison instead of falling back to reference equality.
+/// A list with value equality. Thus a record that holds one is part of the cache comparison in
+/// the incremental pipeline. Without this class, the comparison uses reference equality.
 /// </summary>
 internal sealed class EquatableList<T>(IList<T> collection)
     : ReadOnlyCollection<T>(collection), IEquatable<EquatableList<T>>
@@ -30,8 +30,9 @@ internal sealed class EquatableList<T>(IList<T> collection)
     public override bool Equals(object? obj) => Equals(obj as EquatableList<T>);
 
     /// <summary>
-    /// Order- and length-sensitive, unlike a plain XOR: property order decides element order
-    /// on the wire, so two models differing only in it are genuinely different models.
+    /// This hash code changes with the order and the length, but a simple XOR does not. The
+    /// property order sets the element order on the wire. Thus two models with a different
+    /// property order are two different models.
     /// </summary>
     public override int GetHashCode()
     {

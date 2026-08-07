@@ -1,14 +1,11 @@
 namespace MiniBson;
 
-#if MINIBSON_PUBLIC
 /// <summary>
-/// BSON element types as defined in the BSON specification.
+/// The BSON element types from the BSON specification.
 /// </summary>
+#if MINIBSON_PUBLIC
 public enum BsonType : byte
 #else
-/// <summary>
-/// BSON element types as defined in the BSON specification.
-/// </summary>
 internal enum BsonType : byte
 #endif
 {
@@ -35,15 +32,12 @@ internal enum BsonType : byte
     MaxKey = 0x7F,
 }
 
-#if MINIBSON_PUBLIC
 /// <summary>
-/// BSON binary subtypes.
+/// The BSON binary subtypes from the BSON specification.
 /// </summary>
+#if MINIBSON_PUBLIC
 public enum BsonBinarySubType : byte
 #else
-/// <summary>
-/// BSON binary subtypes.
-/// </summary>
 internal enum BsonBinarySubType : byte
 #endif
 {

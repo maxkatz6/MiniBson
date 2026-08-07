@@ -3,13 +3,13 @@ using MiniBson;
 namespace MiniBson.Tests;
 
 /// <summary>
-/// Where the fixed staging buffer meets document framing: payloads that bypass the buffer, and
-/// length placeholders already flushed by the time the document closes.
+/// The limits of the buffer: values that go directly to the stream, and length placeholders
+/// that the writer already drained at the end of the document.
 /// </summary>
 [TestClass]
 public sealed class BsonWriterBufferingTests
 {
-    /// <summary>Matches BsonWriter's staging buffer size.</summary>
+    /// <summary>The same value as the buffer length of BsonWriter.</summary>
     private const int BufferSize = 8192;
 
     private static byte[] Write(Action<BsonWriter> write)
@@ -284,8 +284,9 @@ public sealed class BsonWriterBufferingTests
     }
 
     /// <summary>
-    /// Staging is invisible from outside once a document closes. Callers wrote against that
-    /// before the buffer existed, and holding a finished document back breaks them silently.
+    /// At the end of a document, a caller cannot see the buffer from outside. Callers wrote
+    /// their code before the buffer existed. If the writer holds a complete document back,
+    /// that code fails and gives no error.
     /// </summary>
     [TestMethod]
     public void ClosingATopLevelDocumentPutsItOnTheStream()
@@ -317,8 +318,8 @@ public sealed class BsonWriterBufferingTests
     }
 
     /// <summary>
-    /// A wrapper holding its own buffer is the common shape for a file or a socket, and
-    /// nothing reaches the real destination unless the writer flushes it too.
+    /// A wrapper with its own buffer is the usual form for a file or a socket. No byte reaches
+    /// the true destination until the writer also flushes that wrapper.
     /// </summary>
     [TestMethod]
     public void FlushReachesThroughABufferedStream()
@@ -348,8 +349,8 @@ public sealed class BsonWriterBufferingTests
     }
 
     /// <summary>
-    /// A length the writer will not accept has to be rejected before the element header is
-    /// staged, or the document keeps an orphan header naming a value that never arrives.
+    /// The writer must reject a bad length before it puts the element header in the buffer.
+    /// If it does not, the document keeps a header that names a value with no bytes.
     /// </summary>
     [TestMethod]
     public void ARejectedLengthWritesNothing()
@@ -414,9 +415,9 @@ public sealed class BsonWriterBufferingTests
     }
 
     /// <summary>
-    /// A length mismatch is recoverable in the sense that the caller sees an exception rather
-    /// than a bad document. What it must not do is leave the enclosing array counting from the
-    /// nested array's index.
+    /// After a wrong length, the caller gets an exception and not a bad document. Thus the
+    /// caller can continue. But the outer array must not then count from the index of the
+    /// nested array.
     /// </summary>
     [TestMethod]
     public void AnArrayLengthMismatchStillRestoresTheEnclosingIndex()

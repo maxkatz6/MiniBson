@@ -3,13 +3,13 @@ using MiniBson;
 namespace MiniBson.Tests;
 
 /// <summary>
-/// Reads the same bytes twice — once from a seekable stream, where skipping seeks, and once from
-/// one that cannot seek, where skipping consumes bytes instead — and returns both results for
-/// the caller to compare.
+/// Reads the same bytes two times and returns both results for the caller to compare. The first
+/// read uses a stream that can seek, where a skip does a seek. The second uses a stream that
+/// cannot seek, where a skip consumes the bytes.
 /// </summary>
 /// <remarks>
-/// The two paths track document ends the same way but move over skipped values differently, so
-/// a bug in the consuming path shows up only on a stream that refuses to seek.
+/// The two paths find the end of a document in the same manner, but they move across a skipped
+/// value differently. Thus you see a bug in the second path only on a stream that cannot seek.
 /// </remarks>
 internal static class DualPathReader
 {
@@ -27,7 +27,7 @@ internal static class DualPathReader
         return (seekable, streamed);
     }
 
-    /// <summary>Drains a stream from its current position.</summary>
+    /// <summary>Reads all bytes of a stream from its current position.</summary>
     public static byte[] Drain(Stream input)
     {
         using var buffer = new MemoryStream();

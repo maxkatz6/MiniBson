@@ -86,8 +86,8 @@ public sealed class BsonWriterReaderTests
     }
 
     /// <summary>
-    /// An array is a document on the wire, so the two closers are interchangeable. The pair
-    /// exists so reading code can mirror the writing code that produced the bytes.
+    /// An array is a document on the wire, so you can use either method to close one. There are
+    /// two names, so the read code can agree with the write code that made the bytes.
     /// </summary>
     [TestMethod]
     public void ReadEndArrayAndReadEndDocumentAreInterchangeable()

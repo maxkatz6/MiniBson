@@ -8,23 +8,20 @@ using System.Text;
 
 namespace MiniBson;
 
-#if MINIBSON_PUBLIC
 /// <summary>
 /// A low-level, forward-only BSON reader.
 /// </summary>
+#if MINIBSON_PUBLIC
 public sealed class BsonReader : IDisposable
 #else
-/// <summary>
-/// A low-level, forward-only BSON reader.
-/// </summary>
 internal sealed class BsonReader : IDisposable
 #endif
 {
     private const int WindowSize = 8192;
 
     /// <summary>
-    /// Smallest length a JavaScript-with-scope value can declare: its own int32, an empty
-    /// string, and an empty document.
+    /// The minimum length that a JavaScript-with-scope value can declare. It has its own
+    /// int32, an empty string, and an empty document.
     /// </summary>
     private const int JavaScriptWithScopeOverhead = 4 + 5 + BsonSize.DocumentOverhead;
 
@@ -33,28 +30,30 @@ internal sealed class BsonReader : IDisposable
     private readonly bool _canSeek;
 
     /// <summary>
-    /// True when <see cref="_buffer"/> is the caller's own storage rather than a rented read
-    /// window: it already holds the whole input, nothing can refill it, and slices of it can
-    /// be handed out without copying.
+    /// True when <see cref="_buffer"/> is the caller's own memory and not a rented window.
+    /// Such a buffer already holds the full input, and nothing can refill it. Thus the reader
+    /// can return a slice of it and make no copy.
     /// </summary>
     private readonly bool _bufferIsSource;
 
-    // Bytes available to read, as the half-open range [_start, _end) of _buffer. Everything
-    // this reader consumes comes from here; the stream is touched only to refill it, which is
-    // what keeps an alternative source (ReadOnlySequence, PipeReader) a change to the refill
-    // path rather than to every read method.
+    // The bytes available to read, as the half-open range [_start, _end) of _buffer. All bytes
+    // that this reader consumes come from here. The reader uses the stream only to refill the
+    // window. Thus a different source (ReadOnlySequence, PipeReader) is a change to the refill
+    // path and not a change to each read method.
     private byte[] _buffer;
     private int _start;
     private int _end;
 
     private readonly Stack<DocumentContext> _contextStack = new();
 
-    // Bytes consumed so far, counted rather than asked of the stream, which a non-seekable one
-    // cannot answer. Document ends are tracked against it.
+    // A count of the bytes that the reader consumed. The reader counts them and does not ask
+    // the stream, because a stream that cannot seek gives no answer. The reader also finds the
+    // end of each document with this count.
     private long _position;
 
-    // End of the outermost open document, or -1 when none is open. No read crosses it, so a
-    // stream holding several documents in sequence stays readable one document at a time.
+    // The end of the outermost open document, or -1 when no document is open. No read goes
+    // past it. Thus a stream that holds a sequence of documents stays readable one document at
+    // a time.
     private long _readLimit = -1;
 
     private bool _disposed;
@@ -99,22 +98,22 @@ internal sealed class BsonReader : IDisposable
     }
 
     /// <summary>
-    /// Current element type after calling Read().
+    /// The type of the current element after a call to Read().
     /// </summary>
     public BsonType CurrentType { get; private set; }
 
     /// <summary>
-    /// Current element name after calling Read().
+    /// The name of the current element after a call to Read().
     /// </summary>
     public string CurrentName { get; private set; } = string.Empty;
 
     /// <summary>
-    /// Indicates whether the reader is currently positioned inside an array.
+    /// True when the reader is in an array.
     /// </summary>
     public bool IsInArray => _contextStack.Count > 0 && _contextStack.Peek().IsArray;
 
     /// <summary>
-    /// Reads the start of a document. Must be called before reading elements.
+    /// Reads the start of a document. Call this method before you read the elements.
     /// </summary>
     public void ReadStartDocument() => PushDocument(isArray: false);
 
@@ -128,28 +127,28 @@ internal sealed class BsonReader : IDisposable
 
         var context = _contextStack.Pop();
 
-        // Forward to the terminator, over any element the caller chose not to read. Stopping
-        // one byte short of the end leaves it to be checked below.
+        // Move forward to the terminator, across each element that the caller did not read.
+        // The reader stops one byte before the end, and the code below tests that byte.
         Advance(context.EndPosition - 1 - _position);
 
         var endMarker = ReadByteCore();
         if (endMarker != 0)
             throw new InvalidDataException($"Expected end of document marker (0x00), got 0x{endMarker:X2}");
 
-        // Out of the outermost document, so the next one gets to declare its own extent.
+        // The reader left the outermost document. Thus the next document can declare its own end.
         if (_contextStack.Count == 0)
             _readLimit = -1;
     }
 
     /// <summary>
-    /// Reads the end of an array. An array is a document on the wire, so this is
-    /// <see cref="ReadEndDocument"/> under the name that pairs with
-    /// <see cref="ReadStartArray"/> — and with <c>BsonWriter.WriteEndArray</c>.
+    /// Reads the end of an array. An array is a document on the wire. Thus this method is
+    /// <see cref="ReadEndDocument"/> with the name that agrees with
+    /// <see cref="ReadStartArray"/> and with <c>BsonWriter.WriteEndArray</c>.
     /// </summary>
     public void ReadEndArray() => ReadEndDocument();
 
     /// <summary>
-    /// Reads a document's length prefix and opens a context for it.
+    /// Reads the length prefix of a document and opens a <c>DocumentContext</c> for it.
     /// </summary>
     private void PushDocument(bool isArray)
     {
@@ -162,8 +161,8 @@ internal sealed class BsonReader : IDisposable
         }
         else if (endPosition > _contextStack.Peek().EndPosition)
         {
-            // Left unchecked, an overlong nested length would let reads and skips inside it
-            // run past the enclosing document and misread whatever follows.
+            // Without this test, a nested length that is too large lets a read or a skip go
+            // past the end of the outer document and read the wrong bytes.
             throw new InvalidDataException(
                 $"A nested document declares {length} bytes, which does not fit in the document containing it.");
         }
@@ -172,7 +171,8 @@ internal sealed class BsonReader : IDisposable
     }
 
     /// <summary>
-    /// Reads the next element header. Returns true if there's an element, false if at end of document.
+    /// Reads the header of the next element. Returns true if there is an element. Returns
+    /// false at the end of the document.
     /// </summary>
     public bool Read()
     {
@@ -181,7 +181,7 @@ internal sealed class BsonReader : IDisposable
 
         var context = _contextStack.Peek();
 
-        // Check if we're at the end of document
+        // Test for the end of the document.
         if (_position >= context.EndPosition - 1)
         {
             CurrentType = default;
@@ -210,10 +210,10 @@ internal sealed class BsonReader : IDisposable
         return ReadByteCore() != 0;
     }
 
-    // The numeric readers accept any of the three numeric wire types and convert, so a model
-    // whose property widened or narrowed still reads documents written before the change. The
-    // switch is the whole type check; a separate EnsureType ahead of it would only repeat the
-    // set it already lists.
+    // The number readers accept all three number types on the wire and convert between them.
+    // Thus a model with a wider or a narrower property can still read an older document. The
+    // switch is the full type test. An EnsureType call before it would give the same list of
+    // types a second time.
 
     /// <summary>
     /// Reads a 32-bit integer value.
@@ -277,7 +277,7 @@ internal sealed class BsonReader : IDisposable
     }
 
     /// <summary>
-    /// Reads a BSON ObjectId into the provided span.
+    /// Reads a BSON ObjectId into the span that you supply.
     /// </summary>
     public void ReadObjectId(Span<byte> destination)
     {
@@ -298,12 +298,12 @@ internal sealed class BsonReader : IDisposable
     }
 
     /// <summary>
-    /// Consumes a binary value's length prefix and subtype byte, leaving the reader on the
-    /// payload.
+    /// Consumes the length prefix and the subtype byte of a binary value. The reader then
+    /// points at the data.
     /// </summary>
     /// <param name="dataLength">
-    /// Payload length. The deprecated <see cref="BsonBinarySubType.BinaryOld"/> repeats the
-    /// length inside the payload, and it is the inner one that describes the bytes.
+    /// The length of the data. The deprecated <see cref="BsonBinarySubType.BinaryOld"/> subtype
+    /// gives the length a second time inside the data, and that inner length is the correct one.
     /// </param>
     private BsonBinarySubType ReadBinaryHeader(out int dataLength)
     {
@@ -318,11 +318,11 @@ internal sealed class BsonReader : IDisposable
     }
 
     /// <summary>
-    /// Reads binary data as a <see cref="ReadOnlyMemory{T}"/>.
-    /// When the reader was constructed from a <see cref="byte"/> array or array-backed
-    /// <see cref="ReadOnlyMemory{T}"/>, the returned memory is a slice into the source
-    /// buffer (no allocation). For stream-based input the data is copied into a new array.
-    /// The returned memory aliases the source buffer; mutations to the source are visible.
+    /// Reads binary data as a <see cref="ReadOnlyMemory{T}"/>. A reader from a
+    /// <see cref="byte"/> array, or from a <see cref="ReadOnlyMemory{T}"/> with an array behind
+    /// it, returns a slice of your memory and allocates nothing. A reader from a stream copies
+    /// the data into a new array. The slice points at your memory, so you see each change that
+    /// you make to it.
     /// </summary>
     public (ReadOnlyMemory<byte> Data, BsonBinarySubType SubType) ReadBinaryAsMemory()
     {
@@ -376,11 +376,12 @@ internal sealed class BsonReader : IDisposable
 
     private string ReadLengthPrefixedString()
     {
-        // The declared length covers the value and its terminator.
+        // The declared length includes the value and its terminator.
         var valueLength = ReadLengthCore(1, "A string") - 1;
 
-        // Decoded straight out of the window when it fits, which is the common case: the
-        // alternative copies the bytes into an array only to throw it away.
+        // The reader decodes the value in the window if the window is large enough, which is
+        // the usual condition. The other method copies the bytes into an array and then
+        // discards that array.
         if (valueLength <= _end - _start || (_stream is not null && valueLength <= _buffer.Length))
         {
             var value = DecodeString(Take(valueLength));
@@ -430,13 +431,13 @@ internal sealed class BsonReader : IDisposable
     }
 
     /// <summary>
-    /// Skips the current element value.
+    /// Skips the value of the current element.
     /// </summary>
     /// <remarks>
-    /// Covers every type <see cref="BsonType"/> names, including the deprecated ones this
-    /// reader has no accessor for. Generated deserializers skip every field they do not
-    /// recognise, so a gap here is a document that cannot be read at all rather than one
-    /// field that cannot be.
+    /// This method accepts each type that <see cref="BsonType"/> names. This includes the
+    /// deprecated types that this reader has no accessor for. Generated deserializers skip
+    /// each element that they do not know. Thus a type that is absent here is not one bad
+    /// element. The reader cannot read the document after that element.
     /// </remarks>
     public void Skip()
     {
@@ -473,14 +474,14 @@ internal sealed class BsonReader : IDisposable
             case BsonType.Undefined:
             case BsonType.MinKey:
             case BsonType.MaxKey:
-                // No data to skip
+                // There is no data to skip.
                 break;
             case BsonType.Regex:
                 ReadCString(); // pattern
                 ReadCString(); // options
                 break;
             case BsonType.DBPointer:
-                // Deprecated: a string, then a 12-byte ObjectId.
+                // A deprecated type. It has a string and then a 12-byte ObjectId.
                 var pointerLength = ReadLengthCore(1, "A string");
                 Advance(pointerLength + BsonSize.ObjectId);
                 break;
@@ -495,8 +496,8 @@ internal sealed class BsonReader : IDisposable
                 Advance(16);
                 break;
             default:
-                // Not a type byte this reader knows, so its length is unknowable and the
-                // rest of the document would be parsed against the wrong offsets.
+                // This reader does not know this type byte. Thus the length of the value is
+                // unknown, and the reader would use the wrong offsets for the other elements.
                 throw new InvalidDataException(
                     $"Cannot skip BSON type 0x{(byte)CurrentType:X2}: it is not a known type, so its length is undefined.");
         }
@@ -554,8 +555,8 @@ internal sealed class BsonReader : IDisposable
     }
 
     /// <summary>
-    /// Reads a null-terminated string. The terminator is normally already in the window, so
-    /// the whole name is decoded from one span.
+    /// Reads a string with a null terminator. The window usually contains the terminator. Thus
+    /// the reader decodes the full name from one span.
     /// </summary>
     private string ReadCString()
     {
@@ -575,8 +576,9 @@ internal sealed class BsonReader : IDisposable
 
         if (_stream is null)
         {
-            // Nothing can refill a buffer-backed reader, so an absent terminator is the end of
-            // the input — unless the window is empty because this reader was disposed.
+            // Nothing can refill a buffer-backed reader. Thus a terminator that is not present
+            // means the end of the input. The one other cause is an empty window after a call
+            // to Dispose.
             ThrowIfDisposed();
             throw new InvalidDataException("Unterminated cstring.");
         }
@@ -585,8 +587,8 @@ internal sealed class BsonReader : IDisposable
     }
 
     /// <summary>
-    /// The rest of a cstring whose terminator was not in the window, accumulated across
-    /// refills.
+    /// Collects the remainder of a cstring across more than one refill. The reader calls this
+    /// method when the window does not contain the terminator.
     /// </summary>
     private string ReadCStringAcrossRefills()
     {
@@ -648,8 +650,9 @@ internal sealed class BsonReader : IDisposable
     }
 
     /// <summary>
-    /// The one place a type mismatch is worded. Takes <see langword="params"/>, which allocates
-    /// — on the throwing path only, where the exception costs more than the array.
+    /// The one method that makes the message for a wrong type. It takes a
+    /// <see langword="params"/> array, which allocates memory. Only the failure path allocates
+    /// it, and there the exception costs more than the array.
     /// </summary>
     private InvalidOperationException UnexpectedType(params BsonType[] expected) =>
         new(expected.Length == 1
@@ -667,8 +670,8 @@ internal sealed class BsonReader : IDisposable
 #endif
     }
 
-    // Read primitives. Everything this reader consumes goes through one of these so the
-    // logical position stays accurate without asking the stream where it is.
+    // The read primitives. All bytes that this reader consumes go through one of these methods.
+    // Thus the position stays correct, and the reader does not ask the stream for it.
 
     private byte ReadByteCore()
     {
@@ -686,12 +689,12 @@ internal sealed class BsonReader : IDisposable
 
     private long ReadInt64Core() => BinaryPrimitives.ReadInt64LittleEndian(Take(8));
 
-    // Raw bits keep this little-endian on either endianness, matching BsonWriter.
+    // The raw bits keep this value little-endian on all machines, the same as BsonWriter.
     private double ReadDoubleCore() => BitConverter.Int64BitsToDouble(ReadInt64Core());
 
     /// <summary>
-    /// Reads a length prefix and rejects one no valid value could carry, so a corrupt length
-    /// fails here rather than silently misaligning everything that follows.
+    /// Reads a length prefix and rejects a length that no valid value can have. Thus a bad
+    /// length fails here. It does not put each byte after it at the wrong offset.
     /// </summary>
     private int ReadLengthCore(int minimum, string what)
     {
@@ -716,8 +719,8 @@ internal sealed class BsonReader : IDisposable
     }
 
     /// <summary>
-    /// Fills a caller-owned buffer from the window and then, for anything left, straight from
-    /// the stream: a payload larger than the window is never staged through it.
+    /// Fills your buffer from the window. It then reads the other bytes directly from the
+    /// stream. Thus a value that is longer than the window never goes through the window.
     /// </summary>
     private void ReadExact(byte[] destination, int offset, int count)
     {
@@ -750,8 +753,9 @@ internal sealed class BsonReader : IDisposable
     }
 
     /// <summary>
-    /// Consumes <paramref name="count"/> contiguous bytes from the window. Only for values no
-    /// larger than the window; bulk payloads go through <see cref="ReadExact"/>.
+    /// Consumes <paramref name="count"/> adjacent bytes from the window. Use this method only
+    /// for a value that is not longer than the window. A large value goes through
+    /// <see cref="ReadExact"/>.
     /// </summary>
     private ReadOnlySpan<byte> Take(int count)
     {
@@ -771,10 +775,10 @@ internal sealed class BsonReader : IDisposable
     }
 
     /// <summary>
-    /// Rejects use after disposal. Placed on the three methods every read eventually reaches
-    /// rather than on each public method: disposal empties the window, so anything that still
-    /// has bytes to produce has to refill, copy, or skip to get them. Costs one check per
-    /// logical read instead of one per primitive.
+    /// Rejects a call after a call to <see cref="Dispose"/>. This test is on the three methods
+    /// that each read reaches. It is not on each public method. <see cref="Dispose"/> empties
+    /// the window, so a method with more bytes to return must refill, copy, or skip to get
+    /// them. This costs one test for each read instead of one test for each primitive.
     /// </summary>
     private void ThrowIfDisposed()
     {
@@ -790,8 +794,8 @@ internal sealed class BsonReader : IDisposable
         if (_stream is null)
             throw new EndOfStreamException($"Expected {minimum} bytes but the input ended after {_end - _start}.");
 
-        // Refills start from the front, so the window can hold `minimum` contiguous bytes
-        // however far into it the reader had already got.
+        // Each refill starts at the front of the window. Thus the window can hold `minimum`
+        // adjacent bytes at each position of the reader.
         var available = _end - _start;
         if (_start > 0)
         {
@@ -815,13 +819,13 @@ internal sealed class BsonReader : IDisposable
     }
 
     /// <summary>
-    /// How full to try to make the window. Read-ahead stops at the end of the outermost open
-    /// document, so bytes belonging to whatever follows it on the stream are never consumed —
-    /// and a peer that sends one document and then waits is never read into.
+    /// The number of bytes to put in the window. The reader stops at the end of the outermost
+    /// open document. Thus it never consumes the bytes that come after that document on the
+    /// stream. It also never reads from a peer that sent one document and now waits.
     /// </summary>
     private int RefillTarget(int minimum)
     {
-        // Nothing open, so nothing bounds a read-ahead: take exactly what was asked for.
+        // No document is open, so no limit applies. Take only the bytes that the caller asked for.
         if (_readLimit < 0)
             return minimum;
 
@@ -831,8 +835,9 @@ internal sealed class BsonReader : IDisposable
     }
 
     /// <summary>
-    /// Rejects a read that would run past the outermost open document. Malformed lengths are
-    /// the only way to get here, and consuming those bytes would corrupt whatever follows.
+    /// Rejects a read that goes past the outermost open document. Only a bad length can fail
+    /// this test. If the reader consumed those bytes, it would damage the data that comes
+    /// after them.
     /// </summary>
     private void EnsureWithinDocument(long count)
     {
@@ -845,8 +850,7 @@ internal sealed class BsonReader : IDisposable
     }
 
     /// <summary>
-    /// Moves forward over <paramref name="count"/> bytes without reading them into anything
-    /// the caller sees.
+    /// Moves forward across <paramref name="count"/> bytes. The caller does not see those bytes.
     /// </summary>
     private void Advance(long count)
     {
@@ -857,15 +861,15 @@ internal sealed class BsonReader : IDisposable
 
         if (count < 0)
         {
-            // Only a corrupt length prefix gets here. Returning silently would leave the
-            // reader short of where it thinks it is and parse the remainder as garbage.
+            // Only a bad length prefix comes here. A silent return would put the reader before
+            // its own position and make it read the other bytes at the wrong offsets.
             throw new InvalidDataException(
                 $"A declared length would move the reader {-count} bytes backwards. The input is malformed.");
         }
 
         EnsureWithinDocument(count);
 
-        // Buffered bytes first: the stream is already past them.
+        // Take the bytes in the window first. The stream is already past them.
         var buffered = (int)Math.Min(count, _end - _start);
         _start += buffered;
         _position += buffered;
@@ -884,8 +888,8 @@ internal sealed class BsonReader : IDisposable
             return;
         }
 
-        // Nothing to seek with, so the bytes have to be consumed and dropped. The window is
-        // empty by now, so it doubles as the discard buffer.
+        // The stream cannot seek, so the reader must consume the bytes and discard them. The
+        // window is empty now, so the reader uses it for those bytes.
         _start = 0;
         _end = 0;
 
@@ -917,8 +921,8 @@ internal sealed class BsonReader : IDisposable
 
         if (!_bufferIsSource)
         {
-            // Cleared: the pool hands this array to the next renter as-is, and it still holds
-            // whatever was read through it.
+            // Clear the array. The pool gives it to the next caller without a change, and it
+            // still holds the data that the reader read through it.
             ArrayPool<byte>.Shared.Return(buffer, clearArray: true);
         }
 
@@ -931,12 +935,13 @@ internal sealed class BsonReader : IDisposable
             return;
         }
 
-        // Read-ahead left the stream past what this reader actually consumed. Hand those
-        // bytes back, so a caller keeping the stream resumes where the reader stopped.
+        // The read-ahead put the stream past the bytes that this reader consumed. Return those
+        // bytes, so a caller that keeps the stream continues at the correct position.
         //
-        // The only place seekability is asked about twice. Everywhere else _canSeek decides
-        // alone, but disposal can run after the caller closed the stream underneath us, and
-        // rewinding one of those throws — out of a Dispose, over bytes nobody can read anyway.
+        // This is the one place that asks the stream about seek support a second time. In each
+        // other place, _canSeek is sufficient. But Dispose can run after the caller closed the
+        // stream, and a seek on a closed stream throws. That exception would come out of
+        // Dispose, and it would be about bytes that nobody can read.
         if (buffered > 0 && _canSeek && _stream.CanSeek)
             _stream.Position -= buffered;
     }

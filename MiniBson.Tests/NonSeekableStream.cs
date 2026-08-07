@@ -1,14 +1,14 @@
 namespace MiniBson.Tests;
 
 /// <summary>
-/// A stream that refuses to seek or report its position, standing in for a socket or pipe.
-/// Reaching for <see cref="Stream.Position"/> or <see cref="Stream.Seek"/> fails loudly rather
-/// than quietly working because the test used a <see cref="MemoryStream"/>.
+/// A stream that cannot seek and cannot give its position. It replaces a socket or a pipe in a
+/// test. A call to <see cref="Stream.Position"/> or <see cref="Stream.Seek"/> throws an
+/// exception. With a <see cref="MemoryStream"/>, the same call works and hides the error.
 /// </summary>
 /// <remarks>
-/// <paramref name="chunkSize"/> caps how much a single <see cref="Read"/> returns. Real network
-/// streams hand back short reads, and code that assumes one call fills the request is a common
-/// way to get this wrong.
+/// <paramref name="chunkSize"/> limits the number of bytes that one <see cref="Read"/> returns.
+/// A real network stream returns short reads. Code that expects one call to fill the request is
+/// a common error.
 /// </remarks>
 internal sealed class NonSeekableStream(Stream inner, int chunkSize = int.MaxValue) : Stream
 {

@@ -8,7 +8,7 @@ namespace MiniBson.Tests;
 public sealed class NewtonsoftBsonCrossTests
 {
     /// <summary>
-    /// Tests that MiniBson can read BSON written by Newtonsoft.Json.Bson
+    /// MiniBson reads a document that Newtonsoft.Json.Bson wrote.
     /// </summary>
     [TestMethod]
     public void ReadNewtonsoftWrittenSimpleDocument()
@@ -49,7 +49,7 @@ public sealed class NewtonsoftBsonCrossTests
     }
 
     /// <summary>
-    /// Tests that Newtonsoft can read BSON written by MiniBson
+    /// Newtonsoft.Json.Bson reads a document that MiniBson wrote.
     /// </summary>
     [TestMethod]
     public void NewtonsoftReadsMiniBsonWrittenDocument()
@@ -101,7 +101,7 @@ public sealed class NewtonsoftBsonCrossTests
     }
 
     /// <summary>
-    /// Tests arrays written by Newtonsoft, read by MiniBson
+    /// MiniBson reads an array that Newtonsoft.Json.Bson wrote.
     /// </summary>
     [TestMethod]
     public void ReadNewtonsoftWrittenArray()
@@ -145,7 +145,7 @@ public sealed class NewtonsoftBsonCrossTests
     }
 
     /// <summary>
-    /// Tests arrays written by MiniBson, read by Newtonsoft
+    /// Newtonsoft.Json.Bson reads an array that MiniBson wrote.
     /// </summary>
     [TestMethod]
     public void NewtonsoftReadsMiniBsonWrittenArray()
@@ -189,7 +189,7 @@ public sealed class NewtonsoftBsonCrossTests
     }
 
     /// <summary>
-    /// Tests nested documents cross-compatibility
+    /// Both tools read the nested documents of the other tool.
     /// </summary>
     [TestMethod]
     public void ReadNewtonsoftWrittenNestedDocument()
@@ -234,7 +234,7 @@ public sealed class NewtonsoftBsonCrossTests
     }
 
     /// <summary>
-    /// Tests DateTime compatibility between MiniBson and Newtonsoft
+    /// Both tools read the DateTime values of the other tool.
     /// </summary>
     [TestMethod]
     public void DateTimeRoundTrip()
@@ -266,7 +266,7 @@ public sealed class NewtonsoftBsonCrossTests
     }
 
     /// <summary>
-    /// Tests that MiniBson can read DateTime written by Newtonsoft
+    /// MiniBson reads a DateTime value that Newtonsoft.Json.Bson wrote.
     /// </summary>
     [TestMethod]
     public void ReadNewtonsoftWrittenDateTime()
@@ -297,7 +297,7 @@ public sealed class NewtonsoftBsonCrossTests
     }
 
     /// <summary>
-    /// Tests binary data compatibility
+    /// Newtonsoft.Json.Bson reads the binary data that MiniBson wrote.
     /// </summary>
     [TestMethod]
     public void BinaryDataRoundTrip()
@@ -327,7 +327,7 @@ public sealed class NewtonsoftBsonCrossTests
     }
 
     /// <summary>
-    /// Tests reading binary data written by Newtonsoft
+    /// MiniBson reads the binary data that Newtonsoft.Json.Bson wrote.
     /// </summary>
     [TestMethod]
     public void ReadNewtonsoftWrittenBinary()
@@ -358,7 +358,7 @@ public sealed class NewtonsoftBsonCrossTests
     }
 
     /// <summary>
-    /// Tests null value compatibility
+    /// Newtonsoft.Json.Bson reads a null value that MiniBson wrote.
     /// </summary>
     [TestMethod]
     public void NullValueRoundTrip()
@@ -384,7 +384,7 @@ public sealed class NewtonsoftBsonCrossTests
     }
 
     /// <summary>
-    /// Tests reading null written by Newtonsoft
+    /// MiniBson reads a null value that Newtonsoft.Json.Bson wrote.
     /// </summary>
     [TestMethod]
     public void ReadNewtonsoftWrittenNull()
@@ -410,7 +410,7 @@ public sealed class NewtonsoftBsonCrossTests
     }
 
     /// <summary>
-    /// Tests a complex document with mixed types
+    /// Newtonsoft.Json.Bson reads a document with many different types.
     /// </summary>
     [TestMethod]
     public void ComplexDocumentRoundTrip()
@@ -446,7 +446,7 @@ public sealed class NewtonsoftBsonCrossTests
     }
 
     /// <summary>
-    /// Tests reading a complex Newtonsoft-serialized object
+    /// MiniBson reads a large object that Newtonsoft.Json.Bson wrote.
     /// </summary>
     [TestMethod]
     public void ReadNewtonsoftSerializedObject()

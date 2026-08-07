@@ -3,8 +3,8 @@ using MiniBson;
 namespace MiniBson.Tests;
 
 /// <summary>
-/// Every size helper is checked against what <see cref="BsonWriter"/> actually emits. A
-/// round-trip test would not catch drift: a wrong size is only visible as a byte count.
+/// Each length helper against the bytes that <see cref="BsonWriter"/> writes. A round-trip test
+/// does not find a difference, because you can see a wrong length only as a count of bytes.
 /// </summary>
 [TestClass]
 public sealed class BsonSizeTests
@@ -241,9 +241,9 @@ public sealed class BsonSizeTests
     }
 
     /// <summary>
-    /// The keys alone outgrow an int well before the element count does. Accumulating in an
-    /// int wraps to a negative length, which the writer then rejects with a message about the
-    /// document being too small.
+    /// The keys alone become larger than an int before the element count does. A total in an
+    /// int wraps to a negative length. The writer then rejects that length with a message about
+    /// a document that is too small.
     /// </summary>
     [TestMethod]
     public void CountWhoseKeysOutgrowAnIntIsRejected()

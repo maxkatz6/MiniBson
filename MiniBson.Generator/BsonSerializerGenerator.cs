@@ -28,13 +28,13 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
                      "serialized model.");
 
     /// <summary>
-    /// A member the emitters could not produce code for.
+    /// A member that the emitters cannot write code for.
     /// </summary>
     private sealed record UnsupportedMember(string MemberPath, string Reason, LocationInfo? Location);
 
     /// <summary>
-    /// Collects unsupported members for one generated context class. Write and read
-    /// emitters both visit every member, so entries are de-duplicated by path+reason.
+    /// Collects the unsupported members of one context class. The write emitters and the read
+    /// emitters both read each member. Thus this type keeps one entry for each path and reason.
     /// </summary>
     private sealed class DiagnosticCollector
     {
@@ -49,14 +49,14 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
     }
 
     /// <summary>
-    /// Identifies the member currently being emitted, so an unsupported type can be
-    /// reported against it instead of silently emitting nothing.
+    /// Names the member that the generator writes code for now. Thus the generator can report
+    /// an unsupported type against that member instead of a member with no code.
     /// </summary>
-    /// <param name="MemberPath">How the member is named to the user in a diagnostic.</param>
+    /// <param name="MemberPath">The name of the member in a diagnostic to the user.</param>
     /// <param name="MethodPath">
-    /// How the member is named in generated identifiers. Distinct from
-    /// <paramref name="MemberPath"/> because that one uses simple type names, which two models
-    /// in different namespaces can share.
+    /// The name of the member in a generated identifier. It is different from
+    /// <paramref name="MemberPath"/>, because that path uses the simple type names. Two models
+    /// in different namespaces can have the same simple name.
     /// </param>
     private sealed record EmitScope(
         DiagnosticCollector Diagnostics,
@@ -71,9 +71,9 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         };
 
         /// <summary>
-        /// Records a diagnostic and emits a runtime backstop, so the generated code stays
-        /// well-formed (no cascading compiler errors) and throws rather than losing data
-        /// if the diagnostic is downgraded or suppressed.
+        /// Records a diagnostic and writes a fallback that throws an exception. Thus the
+        /// generated code stays correct and causes no more compiler errors. If the user
+        /// suppresses the diagnostic, the code throws an exception and loses no data.
         /// </summary>
         public void Unsupported(StringBuilder sb, string indent, string reason, string typeName)
         {
@@ -81,7 +81,7 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
             sb.AppendLine($"{indent}ThrowUnsupported(\"{MemberPath}\", \"{typeName}\");");
         }
 
-        /// <summary>Reports a type that has no read/write mapping at all.</summary>
+        /// <summary>Reports a type that has no read mapping and no write mapping.</summary>
         public void UnsupportedType(StringBuilder sb, string indent, TypeRefInfo type)
         {
             var typeName = Display(type);
@@ -118,8 +118,8 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
 
         var classDeclaration = (ClassDeclarationSyntax)context.TargetNode;
 
-        // Nothing to generate into. The user sees this as CS1061 on their Serialize call
-        // rather than as a diagnostic pointing here.
+        // There is no class for the generated code. The user sees error CS1061 on the call to
+        // Serialize. The user does not see a diagnostic that points here.
         if (!classDeclaration.Modifiers.Any(SyntaxKind.PartialKeyword))
             return null;
 
@@ -149,10 +149,10 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
     }
 
     /// <summary>
-    /// Accessibility to emit the context partial with. Only <c>public</c> and <c>internal</c>
-    /// are legal at namespace scope, which is where this generator emits, so everything else
-    /// falls back to <c>internal</c>. A context nested in another type is not supported: the
-    /// generated half would still be emitted at namespace scope.
+    /// The accessibility of the generated context partial. Only <c>public</c> and
+    /// <c>internal</c> are legal at namespace scope, and this generator writes its code there.
+    /// Thus each other accessibility becomes <c>internal</c>. A context in another type is not
+    /// supported, because the generated half is still at namespace scope.
     /// </summary>
     private static string GetAccessibility(ClassDeclarationSyntax classDeclaration) =>
         classDeclaration.Modifiers.Any(SyntaxKind.PublicKeyword) ? "public" : "internal";
@@ -204,8 +204,8 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         sb.AppendLine($"{contextClass.Accessibility} partial class {contextClass.ClassName}");
         sb.AppendLine("{");
 
-        // Models reached through properties need methods too, so the registered types are only
-        // the roots of the walk.
+        // A model that the generator finds through a property also needs methods. Thus the
+        // registered types are only the first types.
         var allTypes = new Dictionary<string, TypeInfo>();
         foreach (var type in contextClass.SerializableTypes)
         {
@@ -222,8 +222,8 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
             sb.AppendLine();
         }
 
-        // Only registered types are valid top-level values, so the public entry points dispatch
-        // over those rather than everything collected above.
+        // Only a registered type is a valid top-level value. Thus the public methods dispatch on
+        // those types and not on each type above.
         GenerateSerializeMethod(sb, contextClass.SerializableTypes);
         sb.AppendLine();
 
@@ -232,7 +232,7 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
 
         GenerateGetSerializedSizeMethod(sb, contextClass.SerializableTypes);
 
-        // Runtime backstop for anything MINIBSON001 was reported for
+        // The fallback for each member with a MINIBSON001 diagnostic.
         if (diagnostics.HasAny)
         {
             sb.AppendLine();
@@ -277,51 +277,56 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
 
     private const string ReadOnlyByteMemoryFullName = "global::System.ReadOnlyMemory<byte>";
 
-    /// <summary>Fully qualified so a user type named MiniBson cannot shadow it.</summary>
+    /// <summary>A fully qualified name, so a user type with the name MiniBson cannot hide it.</summary>
     private const string SizeType = "global::MiniBson.BsonSize";
 
-    /// <summary>Fully qualified so a user type named MiniBson cannot shadow it.</summary>
+    /// <summary>A fully qualified name, so a user type with the name MiniBson cannot hide it.</summary>
     private const string SizeTableType = "global::MiniBson.BsonSizeTable";
 
     /// <summary>
-    /// The size table both passes thread through. Named for collision resistance, not looks:
-    /// it shares scope with whatever the model declared.
+    /// The size table that both passes use. This name prevents a collision, and it is not a
+    /// name for a user to read. It shares its scope with each member of the model.
     /// </summary>
     private const string SizeTableParameter = "__sizes";
 
     /// <summary>
-    /// The length to open a document with. Zero when the destination can be seeked, which the
-    /// writer reads as "patch it in later"; back-patching is cheaper than measuring.
+    /// The length for the start of a document. It is zero when the destination can seek. The
+    /// writer reads zero as an unknown length and writes the length later, which is faster than
+    /// a measurement.
     /// </summary>
     private const string SizedFraming = SizeTableParameter + ".Next()";
 
     /// <summary>
-    /// Type byte plus null-terminated name. Names are known here, so this folds to a literal.
+    /// The type byte and the name with its null terminator. The generator knows the names here,
+    /// so this value becomes a literal.
     /// </summary>
     private static int ElementOverhead(string name) => 1 + Encoding.UTF8.GetByteCount(name) + 1;
 
     /// <summary>
-    /// Name of the generated helper that measures one array-typed member. Every such helper for
-    /// every model lands in one partial class, so this is built from
-    /// <see cref="EmitScope.MethodPath"/> rather than <see cref="EmitScope.MemberPath"/>: the
-    /// latter keeps simple type names, and two models sharing one would emit this helper twice.
+    /// The name of the generated helper that measures one array member. All such helpers for all
+    /// models go into one partial class. Thus this name comes from
+    /// <see cref="EmitScope.MethodPath"/> and not from <see cref="EmitScope.MemberPath"/>.
+    /// <see cref="EmitScope.MemberPath"/> keeps the simple type names, and two models with the
+    /// same simple name would give this helper two times.
     /// </summary>
     private static string ArrayMeasureMethodName(EmitScope scope) =>
         "Measure" + scope.MethodPath + "Array";
 
     /// <summary>
-    /// The BSON representation a model type maps onto.
+    /// The BSON representation of a model type.
     /// </summary>
     /// <remarks>
-    /// Scalar member names are load-bearing: emitters build call names from them, so
-    /// <c>Int32</c> yields <c>WriteInt32</c>, <c>ReadInt32</c>, and <c>BsonSize.Int32</c>.
-    /// Adding a scalar type needs a member here, a <see cref="Map"/> case, and matching members
-    /// on those three types — no emitter changes. Renaming one breaks generation silently.
-    /// The remaining members are handled case by case, since each direction differs.
+    /// You must not change the names of the scalar members. The emitters build method names
+    /// from them, so <c>Int32</c> gives <c>WriteInt32</c>, <c>ReadInt32</c>, and
+    /// <c>BsonSize.Int32</c>. To add a scalar type, add a member here, a <see cref="Map"/> case,
+    /// and the equivalent members on those three types. No emitter needs a change. A new name
+    /// for a member breaks the code generation and gives no error. The other members have
+    /// separate code in each emitter, because the read direction and the write direction are
+    /// different for them.
     /// </remarks>
     private enum BsonMapping
     {
-        /// <summary>No mapping exists. Reported as MINIBSON001 with a runtime backstop.</summary>
+        /// <summary>There is no mapping. The generator reports MINIBSON001 and writes a fallback.</summary>
         Unsupported,
         Boolean,
         Int32,
@@ -338,23 +343,23 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         Nested,
     }
 
-    /// <summary>A model type resolved to its BSON representation.</summary>
+    /// <summary>A model type with its BSON representation.</summary>
     private readonly record struct ValueMapping(
         BsonMapping Kind,
-        /// <summary>Cast widening the value to its wire type when writing, or empty.</summary>
+        /// <summary>The cast that makes the value wider for the wire, or an empty string.</summary>
         string WriteCast = "",
-        /// <summary>Whether reading has to narrow the wire value back to the model type.</summary>
+        /// <summary>True when a read must make the wire value narrow again for the model type.</summary>
         bool CastOnRead = false,
-        /// <summary>Element type, for <see cref="BsonMapping.Array"/>.</summary>
+        /// <summary>The element type, for <see cref="BsonMapping.Array"/>.</summary>
         TypeRefInfo? ElementType = null,
-        /// <summary>Target type, for <see cref="BsonMapping.Nested"/>.</summary>
+        /// <summary>The target type, for <see cref="BsonMapping.Nested"/>.</summary>
         TypeInfo? NestedType = null);
 
     /// <summary>
-    /// Resolves a model type to its BSON representation. Every emitter dispatches on the result,
-    /// so this ordering exists in one place. It is load-bearing: <c>byte[]</c> before arrays in
-    /// general, and enums before the <see cref="SpecialType"/> switch, since an enum's own
-    /// <see cref="SpecialType"/> is <see cref="SpecialType.None"/>.
+    /// Gives the BSON representation of a model type. Each emitter dispatches on the result, so
+    /// this order is in one place. You must not change the order: <c>byte[]</c> comes before the
+    /// general array test, and the enums come before the <see cref="SpecialType"/> switch. The
+    /// <see cref="SpecialType"/> of an enum is <see cref="SpecialType.None"/>.
     /// </summary>
     private static ValueMapping Map(TypeRefInfo type)
     {
@@ -380,7 +385,7 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
             case SpecialType.System_Int32:
                 return new ValueMapping(BsonMapping.Int32);
 
-            // Narrower than int32 on the wire, so reading has to narrow back.
+            // This type is narrower than an int32 on the wire, so a read must make it narrow again.
             case SpecialType.System_Byte:
             case SpecialType.System_SByte:
             case SpecialType.System_Int16:
@@ -407,9 +412,9 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
                 return new ValueMapping(BsonMapping.DateTime);
         }
 
-        // Matched on the fully qualified name alone. Matching the simple name too would claim
-        // any user type called Guid, which reaches here before the Nested case below and emits
-        // a WriteGuid call that does not compile.
+        // The test uses only the fully qualified name. A test on the simple name would also
+        // accept a user type with the name Guid. Such a type comes here before the Nested case
+        // below, and the generator would write a WriteGuid call that does not compile.
         if (type.FullyQualifiedName == "global::System.Guid")
             return new ValueMapping(BsonMapping.Guid);
 
@@ -419,7 +424,7 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         return new ValueMapping(BsonMapping.Unsupported);
     }
 
-    /// <summary>Integral types BSON has to widen to int64 because int32 cannot hold them.</summary>
+    /// <summary>The integer types that BSON must make int64, because an int32 is too small.</summary>
     private static bool IsWideIntegral(SpecialType type) =>
         type == SpecialType.System_Int64
         || type == SpecialType.System_UInt64
@@ -427,7 +432,7 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
 
     private static bool IsPrimitiveType(ITypeSymbol type)
     {
-        // Enums are treated as primitives (mapped to their underlying type)
+        // An enum is a primitive here. It maps to its underlying type.
         if (type.TypeKind == TypeKind.Enum)
             return true;
 
@@ -456,8 +461,8 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         var typeName = type.FullyQualifiedName;
         var methodName = GetSafeMethodName(type);
 
-        // Document framing only; the body lives in the Inner method so nested writes and
-        // top-level writes share one definition.
+        // This method writes only the document start and end. The body is in the Inner method,
+        // so a nested write and a top-level write use one definition.
         sb.AppendLine($"    private void Write{methodName}(BsonWriter writer, {typeName} instance)");
         sb.AppendLine("    {");
         sb.AppendLine("        // One measuring walk for the whole graph, replayed below in the order the writer");
@@ -505,9 +510,10 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         var isNullable = type.IsNullable;
         var underlyingType = type.NullableUnderlyingType ?? type;
 
-        // Every reference is checked, annotated or not. A model compiled without nullable
-        // reference types still holds nulls, and there is no encoding of one as a string or a
-        // binary payload — measuring would report a document the writer then fails to produce.
+        // The generated code tests each reference, with an annotation and without one. A model
+        // that the compiler built without nullable reference types can still hold a null. BSON
+        // has no encoding of a null as a string or as binary data. Thus a measurement would give
+        // a document that the writer cannot then write.
         if (!type.IsValueType)
         {
             sb.AppendLine($"        if ({accessor} is null)");
@@ -578,7 +584,7 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         var isNullable = type.IsNullable;
         var underlyingType = type.NullableUnderlyingType ?? type;
 
-        // Annotated or not; see GenerateWriteProperty.
+        // With an annotation and without one. See GenerateWriteProperty.
         if (!type.IsValueType)
         {
             sb.AppendLine($"{indent}if ({accessor} is null)");
@@ -610,7 +616,7 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
 
         switch (mapping.Kind)
         {
-            // Jagged arrays (including byte[][]) have no element-position mapping
+            // A jagged array, and this includes byte[][], has no mapping for an element position.
             case BsonMapping.Binary:
             case BsonMapping.Array:
                 scope.Unsupported(sb, indent, "nested arrays are not supported", Display(type));
@@ -623,7 +629,7 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
                 sb.AppendLine($"{indent}writer.WriteEndDocument();");
                 return;
 
-            // ReadOnlyMemory<byte> has no name-less write overload.
+            // ReadOnlyMemory<byte> has no write overload without a name.
             case BsonMapping.BinaryMemory:
             case BsonMapping.Unsupported:
                 scope.UnsupportedType(sb, indent, type);
@@ -635,21 +641,21 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         }
     }
 
-    // Measure emitters. Each one mirrors its Write counterpart above, in the same conditional
-    // order, and the two must be changed together: a size that disagrees with what is written
-    // makes BsonWriter throw when the document closes.
+    // The measure emitters. Each one agrees with its Write equivalent above and uses the same
+    // order of tests. You must change the two together. A length that does not agree with the
+    // bytes makes BsonWriter throw an exception at the end of the document.
 
     private static void GenerateMeasureMethod(StringBuilder sb, TypeInfo type, DiagnosticCollector diagnostics)
     {
         var typeName = type.FullyQualifiedName;
         var methodName = GetSafeMethodName(type);
 
-        // Array members get helper methods, emitted after this one. Both sides call them.
+        // An array member gets a helper method after this one. Both directions call it.
         var helpers = new StringBuilder();
 
         sb.AppendLine("    /// <summary>");
-        sb.AppendLine("    /// Encoded length of this type as a document, recording it and every document nested");
-        sb.AppendLine("    /// inside it in the order the write pass asks for them.");
+        sb.AppendLine("    /// The encoded length of this type as a document. This method records that length and");
+        sb.AppendLine("    /// the length of each nested document, in the order that the write pass asks for them.");
         sb.AppendLine("    /// </summary>");
         sb.AppendLine($"    private static int Measure{methodName}({typeName} instance, {SizeTableType} {SizeTableParameter})");
         sb.AppendLine("    {");
@@ -660,12 +666,12 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         sb.AppendLine("    }");
         sb.AppendLine();
 
-        sb.AppendLine("    /// <summary>Encoded size of this type's elements, excluding framing.</summary>");
+        sb.AppendLine("    /// <summary>The encoded length of the elements of this type, without the document overhead.</summary>");
         sb.AppendLine($"    private static int Measure{methodName}Inner({typeName} instance, {SizeTableType} {SizeTableParameter})");
         sb.AppendLine("    {");
         sb.AppendLine("#nullable disable");
-        // Checked: a size that wrapped would agree with nothing, and the writer would be told
-        // to open a document it cannot describe.
+        // A checked block. A length that wrapped would agree with no other length, and the
+        // writer would start a document that it cannot describe.
         sb.AppendLine("        checked");
         sb.AppendLine("        {");
         sb.AppendLine("            var __size = 0;");
@@ -689,10 +695,10 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         var isNullable = type.IsNullable;
         var underlyingType = type.NullableUnderlyingType ?? type;
 
-        // WriteNull costs the element header and no value.
+        // WriteNull writes the element header and no value.
         var nullSize = ElementOverhead(name);
 
-        // Annotated or not; see GenerateWriteProperty.
+        // With an annotation and without one. See GenerateWriteProperty.
         if (!type.IsValueType)
         {
             sb.AppendLine($"{indent}if ({accessor} is null)");
@@ -721,7 +727,8 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
     {
         var mapping = Map(type);
 
-        // Both this and the BsonSize consts fold, so fixed-size values cost nothing at runtime.
+        // The compiler folds this value and the BsonSize const members. Thus a value with a
+        // fixed length costs nothing at run time.
         var overhead = ElementOverhead(name);
         void Add(string valueSize) => sb.AppendLine($"{indent}__size += {overhead} + {valueSize};");
 
@@ -758,20 +765,21 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
     }
 
     /// <summary>
-    /// Emits the helper measuring one array member. Returns the array's complete document
-    /// length, which is what <c>WriteStartArray</c> expects.
+    /// Writes the helper that measures one array member. The helper returns the full document
+    /// length of the array, which is the value that <c>WriteStartArray</c> needs.
     /// </summary>
     private static void GenerateArrayMeasureHelper(StringBuilder helpers, string methodName, TypeRefInfo arrayType, TypeRefInfo elementType, EmitScope elementScope)
     {
         helpers.AppendLine();
-        helpers.AppendLine("    /// <summary>Encoded length of this array, framing and keys included.</summary>");
+        helpers.AppendLine("    /// <summary>The encoded length of this array, with its overhead and its keys.</summary>");
         helpers.AppendLine($"    private static int {methodName}({arrayType.FullyQualifiedName} value, {SizeTableType} {SizeTableParameter})");
         helpers.AppendLine("    {");
         helpers.AppendLine("#nullable disable");
         helpers.AppendLine("        checked");
         helpers.AppendLine("        {");
         helpers.AppendLine($"            var __slot = {SizeTableParameter}.Reserve();");
-        // Type bytes and index keys are counted in bulk, so the emitters below add only values.
+        // This code counts the type bytes and the index keys together. Thus the emitters below
+        // add only the values.
         helpers.AppendLine($"            var __size = {SizeType}.ArrayOverhead(value.Length);");
         helpers.AppendLine("            foreach (var item in value)");
         helpers.AppendLine("            {");
@@ -789,8 +797,8 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         var isNullable = type.IsNullable;
         var underlyingType = type.NullableUnderlyingType ?? type;
 
-        // A null element's header is already counted by ArrayOverhead, so there is no else.
-        // Annotated or not; see GenerateWriteProperty.
+        // ArrayOverhead already counts the header of a null element, so there is no else block.
+        // With an annotation and without one. See GenerateWriteProperty.
         if (!type.IsValueType)
         {
             sb.AppendLine($"{indent}if ({accessor} is not null)");
@@ -819,7 +827,7 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
 
         switch (mapping.Kind)
         {
-            // Jagged arrays (including byte[][]) have no element-position mapping
+            // A jagged array, and this includes byte[][], has no mapping for an element position.
             case BsonMapping.Binary:
             case BsonMapping.Array:
                 scope.Unsupported(sb, indent, "nested arrays are not supported", Display(type));
@@ -834,7 +842,7 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
                 Add($"Measure{methodName}({accessor}, {SizeTableParameter})");
                 return;
 
-            // ReadOnlyMemory<byte> has no name-less write overload.
+            // ReadOnlyMemory<byte> has no write overload without a name.
             case BsonMapping.BinaryMemory:
             case BsonMapping.Unsupported:
                 scope.UnsupportedType(sb, indent, type);
@@ -894,8 +902,8 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         sb.AppendLine("        }");
         sb.AppendLine();
 
-        // Both forms below are a comma-separated list of the locals accumulated above, one
-        // per line, differing only in how each line names its target.
+        // Both forms below are a list of the local variables from above, with a comma between
+        // them and one on each line. Only the name of the target on each line is different.
         void AppendPropertyList(Func<PropertyInfo, string> line)
         {
             var first = true;
@@ -919,8 +927,8 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         }
         else if (type.Properties.FirstOrDefault(p => !p.IsSettable) is { } readOnlyProperty)
         {
-            // An object initializer can't assign this, and emitting one anyway buries the
-            // user in CS0200s pointing at generated code. Report it as MINIBSON001 instead.
+            // An object initializer cannot set this property. Generated code for it gives the
+            // user many CS0200 errors that point at generated code. Report MINIBSON001 instead.
             ScopeFor(diagnostics, type, readOnlyProperty).Unsupported(
                 sb,
                 "        ",
@@ -1023,7 +1031,7 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
 
         switch (mapping.Kind)
         {
-            // Jagged arrays (including byte[][]) have no element-position mapping
+            // A jagged array, and this includes byte[][], has no mapping for an element position.
             case BsonMapping.Binary:
             case BsonMapping.Array:
                 scope.Unsupported(sb, indent, "nested arrays are not supported", Display(type));
@@ -1065,7 +1073,7 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
                 sb.AppendLine($"{indent}}}");
                 return;
 
-            // GenerateReadProperty resolves these before delegating here.
+            // GenerateReadProperty finds these types before it calls this method.
             case BsonMapping.Binary:
             case BsonMapping.BinaryMemory:
             case BsonMapping.Array:
@@ -1082,8 +1090,8 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
     private static void GenerateThrowUnsupportedMethod(StringBuilder sb)
     {
         sb.AppendLine("    /// <summary>");
-        sb.AppendLine("    /// Backstop for members reported as MINIBSON001. Reached only if that");
-        sb.AppendLine("    /// diagnostic was downgraded or suppressed.");
+        sb.AppendLine("    /// The fallback for each member with a MINIBSON001 diagnostic. Code reaches this");
+        sb.AppendLine("    /// method only if you change the severity of that diagnostic or suppress it.");
         sb.AppendLine("    /// </summary>");
         sb.AppendLine("    private static void ThrowUnsupported(string member, string type)");
         sb.AppendLine("        => throw new NotSupportedException(");
@@ -1094,19 +1102,19 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
     private static void GenerateGetSerializedSizeMethod(StringBuilder sb, EquatableList<TypeInfo> types)
     {
         sb.AppendLine("    /// <summary>");
-        sb.AppendLine("    /// Returns the exact number of bytes <see cref=\"Serialize\"/> would write for this value.");
+        sb.AppendLine("    /// Returns the number of bytes that <see cref=\"Serialize\"/> writes for this value.");
         sb.AppendLine("    /// </summary>");
         sb.AppendLine("    /// <remarks>");
-        sb.AppendLine("    /// Exact rather than approximate, provided every property returns the same value when read");
-        sb.AppendLine("    /// twice. This is the same size the writer computes for itself when the destination cannot");
-        sb.AppendLine("    /// be seeked.");
+        sb.AppendLine("    /// The number is exact and not an estimate, but only if each property returns the same");
+        sb.AppendLine("    /// value two times. It is the same length that the writer computes when the destination");
+        sb.AppendLine("    /// cannot seek.");
         sb.AppendLine("    /// </remarks>");
         sb.AppendLine("    public int GetSerializedSize(object input)");
         sb.AppendLine("    {");
         sb.AppendLine("        if (input is null) throw new ArgumentNullException(nameof(input));");
         sb.AppendLine("        var inputType = input.GetType();");
 
-        // BsonSizeTable.None measures without recording: nothing is going to replay it.
+        // BsonSizeTable.None measures and records nothing, because no write pass follows it.
         EmitTypeDispatch(
             sb,
             types,
@@ -1120,7 +1128,7 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
     private static void GenerateSerializeMethod(StringBuilder sb, EquatableList<TypeInfo> types)
     {
         sb.AppendLine("    /// <summary>");
-        sb.AppendLine("    /// Serializes the specified object to BSON format.");
+        sb.AppendLine("    /// Serializes the given object to the BSON format.");
         sb.AppendLine("    /// </summary>");
         sb.AppendLine("    public void Serialize(object input, BsonWriter writer)");
         sb.AppendLine("    {");
@@ -1141,7 +1149,7 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
     private static void GenerateDeserializeMethod(StringBuilder sb, EquatableList<TypeInfo> types)
     {
         sb.AppendLine("    /// <summary>");
-        sb.AppendLine("    /// Deserializes BSON data to an object of the specified type.");
+        sb.AppendLine("    /// Deserializes BSON data to an object of the given type.");
         sb.AppendLine("    /// </summary>");
         sb.AppendLine("    public object? Deserialize(BsonReader reader, Type type)");
         sb.AppendLine("    {");
@@ -1159,14 +1167,15 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
     }
 
     /// <summary>
-    /// Emits the if/else chain matching a runtime type against every registered model. All
-    /// three public entry points dispatch identically, so they share this rather than each
-    /// carrying its own copy of the shape — and of whatever is wrong with it.
+    /// Writes the if/else chain that compares a runtime type with each registered model. The
+    /// three public methods dispatch in the same manner, so they use this one method. Thus each
+    /// method does not have its own copy of the chain and its own errors.
     /// </summary>
     /// <param name="selector">
-    /// Expression yielding the <c>Type</c> to match, also used to name it in the failure message.
+    /// The expression that gives the <c>Type</c> to compare. The failure message also uses it
+    /// to name that type.
     /// </param>
-    /// <param name="body">Statement to emit for a matched model.</param>
+    /// <param name="body">The statement to write for a model that matches.</param>
     private static void EmitTypeDispatch(
         StringBuilder sb,
         EquatableList<TypeInfo> types,
@@ -1182,7 +1191,7 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
             first = false;
         }
 
-        // A context registering no types still has to compile, so the throw stands alone.
+        // A context with no registered type must still compile, so the throw is alone here.
         var indent = first ? "        " : "            ";
         if (!first)
             sb.AppendLine("        else");
@@ -1191,12 +1200,14 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
     }
 
     /// <summary>
-    /// Public readable instance properties of a type and its bases, most derived first.
+    /// The public instance properties of a type and its base types that the generator can read.
+    /// The most derived type comes first.
     /// </summary>
     /// <remarks>
-    /// The order is load-bearing: it is the order elements are emitted in, so reversing it
-    /// changes the bytes on the wire for every model with a base class. The first declaration
-    /// of a name wins, which is what makes a <c>new</c> property shadow the one it hides.
+    /// You must not change this order. It is the order of the elements on the wire, so a
+    /// different order changes the bytes for each model with a base class. If a name occurs two
+    /// times, the first declaration wins. Thus a <c>new</c> property replaces the property that
+    /// it hides.
     /// </remarks>
     private static IEnumerable<IPropertySymbol> GetAllProperties(INamedTypeSymbol type)
     {
@@ -1222,9 +1233,10 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
     }
 
     /// <summary>
-    /// Identifier fragment naming one model type in generated members. Built from the fully
-    /// qualified name, not the simple one: two models called <c>Order</c> in different
-    /// namespaces are both legal and would otherwise emit the same methods into one class.
+    /// The part of an identifier that names one model type in the generated members. It comes
+    /// from the fully qualified name and not from the simple name. Two models with the name
+    /// <c>Order</c> in different namespaces are both legal, and a simple name would give the
+    /// same methods two times in one class.
     /// </summary>
     private static string GetSafeMethodName(TypeInfo type)
     {
@@ -1294,13 +1306,13 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
             enumUnderlying = enumType.EnumUnderlyingType?.SpecialType;
         }
 
-        // An array symbol is never an INamedTypeSymbol, so arrays fall out here without a
-        // test of their own.
+        // An array symbol is never an INamedTypeSymbol. Thus an array stops here, and it needs
+        // no test of its own.
         TypeInfo? nestedTypeInfo = null;
         if (symbol is INamedTypeSymbol namedType &&
             !IsPrimitiveType(symbol) &&
-            // decimal has no BSON mapping here; treating it as a POCO would silently
-            // emit an empty document, so let it fall through to MINIBSON001 instead.
+            // The decimal type has no BSON mapping here. As an ordinary model, it would give an
+            // empty document and no error. Thus it continues to MINIBSON001.
             symbol.SpecialType != SpecialType.System_Decimal &&
             nullableValueType is null)
         {

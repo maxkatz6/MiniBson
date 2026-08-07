@@ -3,104 +3,103 @@ using System.Text;
 
 namespace MiniBson;
 
-#if MINIBSON_PUBLIC
 /// <summary>
-/// Encoded sizes of BSON values, in bytes.
+/// The encoded lengths of the BSON values, in bytes.
 /// </summary>
 /// <remarks>
-/// Each member mirrors the corresponding <see cref="BsonWriter"/> method and must be changed
-/// with it.
+/// Each member agrees with one <see cref="BsonWriter"/> method. You must change the two types
+/// together.
 /// </remarks>
+#if MINIBSON_PUBLIC
 public static class BsonSize
 #else
-/// <summary>
-/// Encoded sizes of BSON values, in bytes.
-/// </summary>
-/// <remarks>
-/// Each member mirrors the corresponding <see cref="BsonWriter"/> method and must be changed
-/// with it.
-/// </remarks>
 internal static class BsonSize
 #endif
 {
     /// <summary>
-    /// Bytes a document costs beyond its elements: the leading int32 length and the trailing null.
+    /// The bytes that a document adds to its elements: the int32 length at the start and the
+    /// null byte at the end.
     /// </summary>
     public const int DocumentOverhead = 5;
 
-    /// <summary>Size of a boolean value.</summary>
+    /// <summary>The length of a boolean value.</summary>
     public const int Boolean = 1;
 
-    /// <summary>Size of an int32 value.</summary>
+    /// <summary>The length of an int32 value.</summary>
     public const int Int32 = 4;
 
-    /// <summary>Size of an int64 value.</summary>
+    /// <summary>The length of an int64 value.</summary>
     public const int Int64 = 8;
 
-    /// <summary>Size of a double value.</summary>
+    /// <summary>The length of a double value.</summary>
     public const int Double = 8;
 
-    /// <summary>Size of a DateTime value, stored as int64 milliseconds.</summary>
+    /// <summary>The length of a DateTime value, which is an int64 of milliseconds.</summary>
     public const int DateTime = 8;
 
-    /// <summary>Size of a timestamp value, stored as two uint32s.</summary>
+    /// <summary>The length of a timestamp value, which is two uint32 values.</summary>
     public const int Timestamp = 8;
 
-    /// <summary>Size of an ObjectId value.</summary>
+    /// <summary>The length of an ObjectId value.</summary>
     public const int ObjectId = 12;
 
-    /// <summary>Size of a GUID: binary length, subtype byte, and 16 payload bytes.</summary>
+    /// <summary>The length of a GUID: the binary length, the subtype byte, and 16 data bytes.</summary>
     public const int Guid = 21;
 
     /// <summary>
-    /// Size of a null, undefined, min-key, or max-key value. These carry no payload.
+    /// The length of a null, undefined, min-key, or max-key value. These types have no data.
     /// </summary>
     public const int Empty = 0;
 
     /// <summary>
-    /// Bytes an element costs beyond its value: the type byte and the null-terminated name.
+    /// The bytes that an element adds to its value: the type byte and the name with its null
+    /// terminator.
     /// </summary>
-    /// <param name="nameByteCount">UTF-8 byte count of the element name, excluding the terminator.</param>
+    /// <param name="nameByteCount">The UTF-8 byte count of the element name, without the terminator.</param>
     public static int Element(int nameByteCount) => 1 + nameByteCount + 1;
 
     /// <summary>
-    /// Bytes an element costs beyond its value: the type byte and the null-terminated name.
+    /// The bytes that an element adds to its value: the type byte and the name with its null
+    /// terminator.
     /// </summary>
     public static int Element(string name) => Element(Encoding.UTF8.GetByteCount(name));
 
     /// <summary>
-    /// Size of a string value. Returns <see cref="Empty"/> for <see langword="null"/>, which is
-    /// the size of the value a caller must write for it: <see cref="BsonWriter.WriteNull(string)"/>.
+    /// The length of a string value. For <see langword="null"/>, this method returns
+    /// <see cref="Empty"/>, which is the length of the value that you must write in its place:
+    /// <see cref="BsonWriter.WriteNull(string)"/>.
     /// </summary>
     /// <remarks>
-    /// There is no string encoding of <see langword="null"/>, so
-    /// <see cref="BsonWriter.WriteString(string, string)"/> throws for one. A caller that
-    /// measures a null here and then writes it as a string has measured a document it cannot
-    /// produce.
+    /// BSON has no string encoding of <see langword="null"/>. Thus
+    /// <see cref="BsonWriter.WriteString(string, string)"/> throws an exception for one. If you
+    /// measure a null value here and then write it as a string, you measure a document that you
+    /// cannot write.
     /// </remarks>
     public static int String(string? value) =>
         value is null ? Empty : 4 + Encoding.UTF8.GetByteCount(value) + 1;
 
-    /// <summary>Size of a binary value.</summary>
+    /// <summary>The length of a binary value.</summary>
     public static int Binary(int length) => 4 + 1 + length;
 
     /// <summary>
-    /// Size of a binary value using the deprecated <see cref="BsonBinarySubType.BinaryOld"/>
-    /// subtype, which repeats the length inside the payload.
+    /// The length of a binary value with the deprecated
+    /// <see cref="BsonBinarySubType.BinaryOld"/> subtype. That subtype gives the length a
+    /// second time inside the data.
     /// </summary>
     public static int BinaryOld(int length) => 4 + 1 + 4 + length;
 
-    /// <summary>Size of a regular expression value.</summary>
+    /// <summary>The length of a regular expression value.</summary>
     public static int Regex(string pattern, string options) =>
         Encoding.UTF8.GetByteCount(pattern) + 1 + Encoding.UTF8.GetByteCount(options) + 1;
 
     /// <summary>
-    /// Bytes an array costs beyond its element values: the document overhead plus, for each
-    /// element, a type byte and the null-terminated decimal index used as its name.
+    /// The bytes that an array adds to its element values. These bytes are the document
+    /// overhead. For each element, they also include a type byte and the decimal index that
+    /// BSON uses as the name, with its null terminator.
     /// </summary>
-    /// <param name="count">Number of elements in the array.</param>
+    /// <param name="count">The number of elements in the array.</param>
     /// <exception cref="ArgumentOutOfRangeException">
-    /// <paramref name="count"/> is negative, or its framing alone is longer than a BSON length
+    /// <paramref name="count"/> is negative, or these bytes alone are more than a BSON length
     /// prefix can express.
     /// </exception>
     public static int ArrayOverhead(int count)
@@ -110,11 +109,12 @@ internal static class BsonSize
     }
 
     /// <summary>
-    /// Total bytes of the null-terminated decimal keys BSON assigns to array elements,
-    /// that is the keys "0" through "<paramref name="count"/> - 1".
+    /// The total bytes of the decimal keys that BSON gives to the array elements, with their
+    /// null terminators. These keys are "0" through "<paramref name="count"/> - 1".
     /// </summary>
     /// <remarks>
-    /// Computed per digit group, so the cost does not grow with <paramref name="count"/>.
+    /// This method computes one digit group at a time. Thus the cost does not increase with
+    /// <paramref name="count"/>.
     /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <paramref name="count"/> is negative, or its keys are longer than a BSON length prefix
@@ -127,8 +127,8 @@ internal static class BsonSize
     }
 
     /// <summary>
-    /// Accumulated in 64 bits: an array long enough to need ten-digit keys costs more key
-    /// bytes than an int can hold, and wrapping would hand back a plausible-looking length.
+    /// This total uses 64 bits. An array with keys of ten digits has more key bytes than an int
+    /// can hold. A value that wrapped would give an incorrect length.
     /// </summary>
     private static long ArrayKeyBytesCore(int count)
     {

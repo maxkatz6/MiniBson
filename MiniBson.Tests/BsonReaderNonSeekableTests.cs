@@ -3,8 +3,8 @@ using MiniBson;
 namespace MiniBson.Tests;
 
 /// <summary>
-/// Reading over a stream that cannot be seeked, where document ends are tracked against a
-/// logical position and skipping means consuming bytes rather than jumping over them.
+/// Reads over a stream that cannot seek. There the reader finds the end of each document with
+/// its own position, and a skip consumes the bytes instead of a seek across them.
 /// </summary>
 [TestClass]
 public sealed class BsonReaderNonSeekableTests
@@ -23,9 +23,9 @@ public sealed class BsonReaderNonSeekableTests
     }
 
     /// <summary>
-    /// Runs <paramref name="read"/> against the same bytes twice, once seekable and once not,
-    /// so a divergence between the seek and consume paths shows up as a failure rather than as
-    /// coverage that only ever exercised one of them.
+    /// Runs <paramref name="read"/> on the same bytes two times, first with a stream that can
+    /// seek and then with a stream that cannot. Thus a difference between the two paths is a
+    /// test failure. Without this helper, a test uses only one of the two paths.
     /// </summary>
     private static void ReadBothWays(byte[] document, Action<BsonReader> read, int chunkSize = int.MaxValue)
     {
@@ -103,8 +103,8 @@ public sealed class BsonReaderNonSeekableTests
     }
 
     /// <summary>
-    /// One byte per Read call, which is what a socket is entitled to do. Anything assuming a
-    /// single call fills the request breaks here.
+    /// One byte for each Read call, which a socket can do. Code that expects one call to fill
+    /// the request fails here.
     /// </summary>
     [TestMethod]
     public void ReadsCorrectlyWhenTheStreamReturnsOneByteAtATime()
@@ -181,7 +181,7 @@ public sealed class BsonReaderNonSeekableTests
     }
 
     /// <summary>
-    /// Large enough that discarding it has to loop over several buffer-sized chunks.
+    /// A value that is large enough to need more than one buffer when the reader discards it.
     /// </summary>
     [TestMethod]
     public void SkipsBinaryLargerThanTheDiscardBuffer()
@@ -209,8 +209,8 @@ public sealed class BsonReaderNonSeekableTests
     }
 
     /// <summary>
-    /// Abandoning a document with fields still unread. Nothing exercised this branch before,
-    /// on either the seek or the consume path.
+    /// The reader leaves a document with unread elements. Before this test, no test used this
+    /// branch on the seek path or on the other path.
     /// </summary>
     [TestMethod]
     public void ReadEndDocumentSkipsUnreadFields()
@@ -298,8 +298,8 @@ public sealed class BsonReaderNonSeekableTests
     }
 
     /// <summary>
-    /// The property that makes streaming work at all: the reader consumes its document and not
-    /// one byte more, so whatever follows on the stream is still readable.
+    /// The rule that makes a sequence of documents possible. The reader consumes its own
+    /// document and no more bytes. Thus the data after it on the stream stays readable.
     /// </summary>
     [TestMethod]
     public void ConsumesExactlyOneDocumentAndLeavesTheRest()
@@ -326,8 +326,8 @@ public sealed class BsonReaderNonSeekableTests
     }
 
     /// <summary>
-    /// Same, but the first document is abandoned early, so the skip has to land exactly on the
-    /// boundary rather than merely somewhere past the fields it read.
+    /// The same test, but the reader leaves the first document early. Thus the skip must stop
+    /// at the exact end of that document, and not at some point after the elements that it read.
     /// </summary>
     [TestMethod]
     public void ConsumesExactlyOneDocumentWhenFieldsAreLeftUnread()

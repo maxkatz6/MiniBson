@@ -3,8 +3,8 @@ using MiniBson;
 namespace MiniBson.Tests;
 
 /// <summary>
-/// Documents whose length is supplied up front rather than patched in afterwards, which is
-/// what lets one be written to a stream that cannot be seeked.
+/// Documents with a length from the caller, and not with a length that the writer writes later.
+/// Only this form lets the writer put a document on a stream that cannot seek.
 /// </summary>
 [TestClass]
 public sealed class BsonWriterKnownLengthTests
@@ -28,8 +28,8 @@ public sealed class BsonWriterKnownLengthTests
         + BsonSize.Element("bin") + BsonSize.Binary(SamplePayload.Length);
 
     /// <summary>
-    /// One document covering scalars, a string, an array, a nested document, and binary. With
-    /// <paramref name="sized"/> set, every length is supplied up front.
+    /// One document with scalars, a string, an array, a nested document, and binary data. When
+    /// <paramref name="sized"/> is true, the caller supplies each length.
     /// </summary>
     private static void WriteSample(BsonWriter w, bool sized)
     {

@@ -4,21 +4,22 @@ using System.Buffers;
 namespace MiniBson;
 
 /// <summary>
-/// Document lengths handed from a measuring pass to the writing pass that follows it.
+/// The document lengths that the measure pass gives to the write pass after it.
 /// </summary>
 /// <remarks>
 /// <para>
-/// An implementation detail of generated serializers, and not something application code has
-/// reason to construct. Writing a document whose length has to be supplied means measuring it
-/// first; measuring each nested document again where it is written costs O(N·depth). The
-/// measure pass instead reserves a slot per document as it descends and fills it on the way
-/// back up, and the write pass reads those lengths back in the same pre-order, so both passes
-/// walk the graph once.
+/// Generated serializers use this class. Application code must not use it directly. Some
+/// documents need a known length before the writer can start them. Thus MiniBson must measure
+/// the document first. A second measurement of each nested document at the point where the
+/// writer writes it would cost O(N·depth). The measure pass prevents that cost. It keeps a slot
+/// for each document when it goes down the object graph, and it fills that slot when it comes
+/// back up. The write pass then reads the lengths in the same order, so each pass reads the
+/// object graph one time.
 /// </para>
 /// <para>
-/// The two passes agree by construction: they visit members in the same order under the same
-/// conditions. <see cref="Next"/> throws rather than returning a wrong length if they ever
-/// stop agreeing.
+/// The two passes always agree, because they read the members in the same order under the same
+/// conditions. If they do not agree, <see cref="Next"/> throws an exception instead of a wrong
+/// length.
 /// </para>
 /// </remarks>
 #if MINIBSON_PUBLIC
@@ -28,9 +29,9 @@ internal sealed class BsonSizeTable
 #endif
 {
     /// <summary>
-    /// A table that records nothing and reports every length as unknown. This is the seekable
-    /// destination: the writer patches lengths in afterwards, so measuring buys nothing and
-    /// the measure pass is skipped entirely.
+    /// A table that records nothing and gives each length as unknown. Use it for a destination
+    /// that can seek. There the writer writes each length later, so a measurement gives no
+    /// advantage and the measure pass does not run.
     /// </summary>
     public static readonly BsonSizeTable None = new(active: false);
 
@@ -46,21 +47,22 @@ internal sealed class BsonSizeTable
     }
 
     /// <summary>
-    /// A table to measure into, or <see cref="None"/> when the destination does not need
-    /// lengths supplied.
+    /// A table for the measure pass, or <see cref="None"/> when the destination needs no length
+    /// from the caller.
     /// </summary>
     public static BsonSizeTable Rent(bool active) => active ? new BsonSizeTable(active: true) : None;
 
     /// <summary>
-    /// Whether this table records anything. False for <see cref="None"/>, whose only purpose
-    /// is to let the write pass run unmeasured through the same code.
+    /// True when this table records the lengths. It is false for <see cref="None"/>. The one
+    /// purpose of <see cref="None"/> is to let the write pass use the same code with no
+    /// measurement.
     /// </summary>
     public bool IsActive => _active;
 
     /// <summary>
-    /// Claims the slot for a document about to be descended into, before its own length is
-    /// known. Reserving on the way down is what puts the slots in the order the write pass
-    /// asks for them.
+    /// Keeps the slot for the next document, before the measure pass knows the length of that
+    /// document. The measure pass keeps each slot when it goes down the object graph. Thus the
+    /// slots are in the order that the write pass asks for.
     /// </summary>
     public int Reserve()
     {
@@ -74,7 +76,7 @@ internal sealed class BsonSizeTable
         return _count++;
     }
 
-    /// <summary>Fills in a slot claimed by <see cref="Reserve"/>.</summary>
+    /// <summary>Fills in a slot from <see cref="Reserve"/>.</summary>
     public void Record(int slot, int size)
     {
         if (_active)
@@ -82,9 +84,10 @@ internal sealed class BsonSizeTable
     }
 
     /// <summary>
-    /// The next recorded length, in the order the measure pass reserved them. Returns 0 for
-    /// <see cref="None"/>, which is what <see cref="BsonWriter.WriteStartDocument(int)"/>
-    /// reads as "patch it in later".
+    /// The next length, in the order that the measure pass kept the slots. For
+    /// <see cref="None"/>, this method returns 0.
+    /// <see cref="BsonWriter.WriteStartDocument(int)"/> reads 0 as an unknown length and writes
+    /// the length later.
     /// </summary>
     public int Next()
     {
@@ -102,8 +105,8 @@ internal sealed class BsonSizeTable
     }
 
     /// <summary>
-    /// Releases the backing storage. Safe to call on <see cref="None"/> and safe to call
-    /// twice, so generated code can put it in a finally block without conditions.
+    /// Releases the memory. You can call this method on <see cref="None"/>, and you can call it
+    /// two times. Thus generated code can put it in a finally block with no test.
     /// </summary>
     public void Return()
     {

@@ -3,8 +3,9 @@ using MiniBson;
 namespace MiniBson.Tests;
 
 /// <summary>
-/// The generated <c>GetSerializedSize</c>. Every other generator suite already asserts it
-/// against the bytes actually written for its own models; this covers the API itself.
+/// The generated <c>GetSerializedSize</c> method. Each other generator test file already
+/// compares it with the bytes that the writer wrote for its own models. This file tests the
+/// method itself.
 /// </summary>
 [TestClass]
 public sealed class BsonGeneratorSizeTests
@@ -51,7 +52,8 @@ public sealed class BsonGeneratorSizeTests
     }
 
     /// <summary>
-    /// Array element keys are decimal indices, so the size has to track digit boundaries.
+    /// The key of an array element is a decimal index. Thus the length must change at each new
+    /// digit count.
     /// </summary>
     [TestMethod]
     [DataRow(0)]
@@ -96,8 +98,8 @@ public sealed class BsonGeneratorSizeTests
     }
 
     /// <summary>
-    /// The size is what the writer would be handed on a non-seekable destination, so a
-    /// disagreement would throw there rather than merely being wrong.
+    /// This is the length that the writer gets for a destination that cannot seek. Thus a
+    /// disagreement throws an exception there. It is not only a wrong number.
     /// </summary>
     [TestMethod]
     public void SizeCanBeUsedToFrameAWriteOnANonSeekableStream()

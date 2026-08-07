@@ -3,9 +3,8 @@ using MiniBson;
 namespace MiniBson.Tests;
 
 /// <summary>
-/// The bounded read window: what it refuses to read past, and what it does with a declared
-/// length that cannot be true. Every case here is one the reader could answer with plausible
-/// nonsense instead of an error.
+/// The limits of the read window: where it stops, and what it does with a length that cannot be
+/// correct. In each test here, the reader could give an incorrect result instead of an error.
 /// </summary>
 [TestClass]
 public sealed class BsonReaderWindowTests
@@ -23,7 +22,7 @@ public sealed class BsonReaderWindowTests
         return ms.ToArray();
     }
 
-    /// <summary>Offset of the nested document's own length prefix in <see cref="WithNested"/>.</summary>
+    /// <summary>The offset of the length prefix of the nested document in <see cref="WithNested"/>.</summary>
     private const int NestedLengthOffset = 4 + 1 + 4; // root length, type byte, "sub\0"
 
     private static byte[] WithNested() => Write(w =>
@@ -35,9 +34,9 @@ public sealed class BsonReaderWindowTests
     });
 
     /// <summary>
-    /// A length shorter than the prefix that declares it. Subtracting the prefix gives a
-    /// negative distance, and moving the reader backwards by it leaves everything after this
-    /// point parsed against the wrong offsets.
+    /// A length that is smaller than its own prefix. The prefix subtracts to a negative
+    /// distance. That distance moves the reader backwards, and the reader then uses the wrong
+    /// offsets for each byte after this point.
     /// </summary>
     [TestMethod]
     public void SkippingANestedDocumentWithATooShortLengthThrows()
@@ -67,8 +66,8 @@ public sealed class BsonReaderWindowTests
     }
 
     /// <summary>
-    /// A nested length that overruns its parent. Reads inside it would otherwise walk out of
-    /// the enclosing document and consume whatever followed on the stream.
+    /// A nested length that goes past its parent. Without this test, a read in that document
+    /// goes out of the outer document and consumes the bytes after it on the stream.
     /// </summary>
     [TestMethod]
     public void NestedDocumentLongerThanItsParentIsRejected()
@@ -99,9 +98,10 @@ public sealed class BsonReaderWindowTests
     }
 
     /// <summary>
-    /// A reader given a slice must not look at the bytes behind it. With a truncated document
-    /// followed by an unrelated one, scanning for a name terminator past the slice finds the
-    /// neighbour's and composes a field name from bytes that were never part of this document.
+    /// A reader with a slice must not read the bytes behind that slice. Here a short document
+    /// comes before a different document. A search for a name terminator past the slice finds
+    /// the terminator of the adjacent document. The reader then makes an element name from
+    /// bytes that are not part of this document.
     /// </summary>
     [TestMethod]
     public void ReaderOverAMemorySliceStopsAtTheSliceEnd()
@@ -142,9 +142,8 @@ public sealed class BsonReaderWindowTests
     }
 
     /// <summary>
-    /// Read-ahead is what makes the stream path cheap, and it is also the thing that could
-    /// swallow the next document. Two readers over one seekable stream have to see one
-    /// document each.
+    /// The read-ahead makes the stream path fast, but it can also consume the next document.
+    /// Two readers on one stream that can seek must each get one document.
     /// </summary>
     [TestMethod]
     public void SequentialDocumentsOnASeekableStreamReadOneAtATime()
@@ -171,8 +170,9 @@ public sealed class BsonReaderWindowTests
     }
 
     /// <summary>
-    /// Same, but the first document is abandoned with fields unread. The skip has to land on
-    /// the boundary exactly, which means accounting for what read-ahead already consumed.
+    /// The same test, but the reader leaves the first document with unread elements. The skip
+    /// must stop at the exact end of that document. Thus it must include the bytes that the
+    /// read-ahead already consumed.
     /// </summary>
     [TestMethod]
     public void SkippingToTheEndOfASeekableDocumentLandsOnTheBoundary()
@@ -209,8 +209,8 @@ public sealed class BsonReaderWindowTests
     }
 
     /// <summary>
-    /// Names longer than a single refill, so the terminator is found on a later one and the
-    /// pieces have to be stitched back together.
+    /// Names that are longer than one refill. The reader finds the terminator on a later
+    /// refill, and it must join the parts of the name.
     /// </summary>
     [TestMethod]
     [DataRow(1)]
@@ -243,9 +243,9 @@ public sealed class BsonReaderWindowTests
     }
 
     /// <summary>
-    /// Disposal returns the window to the pool. Reading on afterwards would otherwise read
-    /// whatever the next renter of that array put in it, or fail as an index error that says
-    /// nothing about the actual mistake.
+    /// A call to Dispose returns the window to the pool. Without this test, a read after that
+    /// call gets the data of the next user of that array. It can also fail with an index error
+    /// that shows nothing about the true cause.
     /// </summary>
     [TestMethod]
     public void ReadingAfterDisposeThrowsObjectDisposed()
@@ -277,7 +277,7 @@ public sealed class BsonReaderWindowTests
         Assert.Throws<ObjectDisposedException>(() => reader.Skip());
     }
 
-    /// <summary>A buffer-backed reader rents no window, but is just as unusable afterwards.</summary>
+    /// <summary>A buffer-backed reader rents no window, but you also cannot use it after Dispose.</summary>
     [TestMethod]
     public void ReadingAfterDisposeThrowsForABufferBackedReader()
     {

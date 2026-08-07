@@ -7,9 +7,9 @@ using MiniBson.Generator;
 namespace MiniBson.Tests;
 
 /// <summary>
-/// Unsupported types must fail the build with MINIBSON001 rather than silently
-/// round-tripping as an empty value. These run the generator in-process, because a
-/// model that trips the diagnostic cannot be compiled into this test project.
+/// An unsupported type must stop the build with MINIBSON001. It must not give an empty value
+/// and no error. These tests run the generator in the test process, because the test project
+/// cannot compile a model that causes the diagnostic.
 /// </summary>
 [TestClass]
 public sealed class BsonGeneratorDiagnosticTests
@@ -33,8 +33,8 @@ public sealed class BsonGeneratorDiagnosticTests
     }
 
     /// <summary>
-    /// Diagnostics from compiling the generated code, rather than from producing it. Some
-    /// mistakes only surface here, as errors inside a file the user cannot edit.
+    /// The diagnostics from a compilation of the generated code, and not from the generator.
+    /// Some errors occur only here, in a file that the user cannot change.
     /// </summary>
     private static ImmutableArray<Diagnostic> CompileGenerated([StringSyntax("csharp")] string source)
     {
@@ -235,9 +235,9 @@ public sealed class BsonGeneratorDiagnosticTests
     }
 
     /// <summary>
-    /// Only <c>System.Guid</c> maps to the BSON UUID subtype. A user type that merely shares
-    /// the simple name is an ordinary model, and claiming it emitted a <c>WriteGuid</c> call
-    /// that does not compile.
+    /// Only <c>System.Guid</c> maps to the BSON UUID subtype. A user type with the same simple
+    /// name is an ordinary model. Before this test, the generator accepted such a type and
+    /// wrote a <c>WriteGuid</c> call that does not compile.
     /// </summary>
     [TestMethod]
     public void UserTypeNamedGuidIsTreatedAsANestedModel()
@@ -270,9 +270,9 @@ public sealed class BsonGeneratorDiagnosticTests
     }
 
     /// <summary>
-    /// Two models can legally share a simple name. Generated helpers all land in one partial
-    /// class, so naming them after the simple name emits the same member twice — a CS0111 in
-    /// a file the user cannot edit and did not write.
+    /// Two models can legally have the same simple name. All generated helpers go into one
+    /// partial class. Thus a name from the simple name gives the same member two times. The
+    /// result is error CS0111 in a file that the user did not write and cannot change.
     /// </summary>
     [TestMethod]
     public void ModelsSharingASimpleNameCompile()

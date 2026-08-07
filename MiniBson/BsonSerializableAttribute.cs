@@ -3,8 +3,8 @@ using System;
 namespace MiniBson;
 
 /// <summary>
-/// Marks a partial class as a BSON serialization context and specifies which types should have
-/// serialization code generated.
+/// Makes a partial class a BSON context and names one type that gets generated serialization
+/// code.
 /// </summary>
 [AttributeUsage(AttributeTargets.Class, AllowMultiple = true, Inherited = false)]
 #if MINIBSON_PUBLIC
@@ -14,7 +14,7 @@ internal sealed class BsonSerializableAttribute : Attribute
 #endif
 {
     /// <summary>
-    /// The type to generate serialization code for.
+    /// The type that gets the generated serialization code.
     /// </summary>
     public Type Type { get; }
 

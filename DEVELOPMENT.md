@@ -1,220 +1,268 @@
 # Developing MiniBson
 
-This document covers the repository itself. For installation and usage, see [README.md](README.md).
+This document is about the repository. To learn how to use MiniBson, see [README.md](README.md).
 
 ## Prerequisites
 
-The repository selects the .NET 10 SDK in `global.json` and permits roll-forward to newer major SDKs. Install .NET SDK 10 or later before building.
+The `global.json` file selects the .NET 10 SDK. Its `rollForward` setting also lets the build use a newer major SDK. Install the .NET SDK 10 or a later version before you build.
 
 ## Repository structure
 
 | Project | Target frameworks | Responsibility |
 | --- | --- | --- |
-| `MiniBson` | `netstandard2.0`, `net8.0` | Reflection-free BSON reader, writer, and serialization attribute |
-| `MiniBson.Generator` | `netstandard2.0` | Roslyn incremental source generator; analyzer compatibility requires the `netstandard2.0` target |
-| `MiniBson.Tests` | `net10.0` | MSTest coverage for the runtime, generator, diagnostics, wire format, and interoperability |
+| `MiniBson` | `netstandard2.0`, `net8.0` | BSON reader, writer, and serialization attribute, with no reflection |
+| `MiniBson.Generator` | `netstandard2.0` | Roslyn incremental source generator. It must target `netstandard2.0` to work as an analyzer |
+| `MiniBson.Tests` | `net10.0` | MSTest tests for the runtime, the generator, the diagnostics, the wire format, and compatibility with other BSON tools |
 
-The implementation has two deliberate layers:
+The implementation has two layers:
 
-1. `BsonReader`, `BsonWriter`, and `BsonSize` understand the BSON wire format but know nothing about application models. The `BsonType` and `BsonBinarySubType` enums live in `BsonTypes.cs`, since reader and writer share them. `BsonSizeTable` sits beside them as the one runtime type that exists only for generated code.
-2. The generator emits model-specific code that calls those low-level APIs.
+1. `BsonReader`, `BsonWriter`, and `BsonSize` know the BSON wire format. They know nothing about models. The `BsonType` and `BsonBinarySubType` enums are in `BsonTypes.cs`, because the reader and the writer both use them. `BsonSizeTable` is the one runtime type that only generated code uses.
+2. The generator writes model-specific code. That code calls the low-level API.
 
-Keep BSON encoding rules in the runtime layer. Generator changes should compose reader and writer operations rather than duplicate format logic.
+Keep the BSON format rules in the runtime layer. A change to the generator must use the reader and writer operations. Do not put format rules in the generator a second time.
 
 ## Build and test
 
-From the repository root:
+Run these commands from the repository root:
 
 ```bash
 dotnet build
 dotnet test
 ```
 
-The test project enables `EmitCompilerGeneratedFiles`. After a Debug build, generated contexts are under:
+The test project sets `EmitCompilerGeneratedFiles` to true. After a Debug build, you can find the generated contexts here:
 
 ```text
 MiniBson.Tests/obj/Debug/net10.0/generated/MiniBson.Generator/
 ```
 
-Inspecting generated output is usually the quickest way to diagnose a malformed source.
+To find the cause of bad generated code, read this output first. It is usually the fastest method.
 
 ## Runtime design
 
-### Document lengths and seeking
+### Document lengths and the seek operation
 
-BSON documents begin with their total length, which is unknown until the document is complete. There are only three ways to resolve that, and MiniBson uses two of them:
+A BSON document starts with its total length. The writer does not know that length until the document is complete. There are only three solutions to this problem, and MiniBson uses two of them:
 
-1. **Patch it in afterwards.** `WriteStartDocument()` writes a placeholder and `WriteEndDocument` seeks back to fill it in. Cheapest, but requires a seekable stream.
-2. **Compute it up front.** `WriteStartDocument(int)` writes the real length immediately. Works on any stream. This is what generated code does when `RequiresKnownLength` is set.
-3. **Buffer the whole document, then flush.** Deliberately not implemented: it makes writer memory scale with document size, and precomputation covers the source-generated path without that cost.
+1. **Write the length later.** `WriteStartDocument()` writes a placeholder. `WriteEndDocument` then does a seek back to that placeholder and writes the correct length. This is the fastest solution, but it needs a stream that can seek.
+2. **Compute the length first.** `WriteStartDocument(int)` writes the correct length immediately. This works with all streams. Generated code uses this solution when `RequiresKnownLength` is true.
+3. **Keep the full document in memory, then write it.** MiniBson does not do this. The writer memory would then increase with the document length. Solution 2 gives the same result for generated code, and it does not have that cost.
 
-Because option 3 is absent, the low-level API on a non-seekable stream must supply lengths; opening a document without one throws.
+Because MiniBson does not use solution 3, you must supply the length to the low-level API when the stream cannot seek. If you start a document without a length there, the writer throws an exception.
 
-### Reading without seeking
+### Reads without a seek
 
-`BsonReader` needs two things from a position: knowing where the current document ends, and moving forward over skipped values. Neither requires seeking.
+`BsonReader` must do two things with a position. It must know where the current document ends. It must also move forward across values that it skips. Neither operation needs a seek.
 
-It maintains `_position` itself — a count of bytes consumed — and every read goes through a primitive that keeps it accurate. `Advance` handles forward movement: it drops buffered bytes first, then seeks when the stream can, and otherwise reads and discards. Keeping the seek path matters because generated deserializers skip every unknown field, and a large skipped value would otherwise be copied rather than jumped over.
+The reader keeps its own `_position` field. This field is a count of the bytes that the reader consumed. Every read operation goes through one primitive that keeps `_position` correct.
+
+`Advance` moves the reader forward. First, it discards the bytes in the window. Then it does a seek if the stream can seek. If the stream cannot seek, it reads the bytes and then discards them.
+
+The seek path is necessary. Generated deserializers skip all elements that they do not know. Without that path, the reader must read all the bytes of a large skipped value.
 
 ### The read window
 
-Reads come from a pooled window (`WindowSize`, 8 KB) over the input, held as the half-open range `[_start, _end)` of `_buffer`. A reader constructed from `byte[]` or `ReadOnlyMemory<byte>` points that window at the caller's own storage and never refills; a stream-backed reader rents a window and refills it. Unifying the two removed the parallel buffer-backed and stream paths, and with them a class of bug where a slice-relative read used array-relative bounds.
+All reads come from a window over the input. The window is 8 KB (`WindowSize`). It is the half-open range `[_start, _end)` of `_buffer`.
 
-Three constraints shape the refill:
+The source of the window depends on the constructor:
 
-- **Read-ahead stops at the end of the outermost open document** (`_readLimit`). Without that bound, a reader on a socket would consume bytes belonging to the next message — or block waiting for a peer that has sent its message and is waiting for a reply. `RefillTarget` computes how much of the window may be filled; with no document open it reads exactly what was asked for, which is how a document's own four-byte length prefix is read without overshooting.
-- **Values can span refills.** `ReadCString` decodes from the window when the terminator is already in it, which is the common case, and otherwise accumulates across refills in `ReadCStringAcrossRefills`. Length-prefixed strings decode in place when they fit the window.
-- **Values can exceed the window.** `ReadExact` takes what the window has and then reads the remainder straight into the caller's array, so a binary payload is never staged through the window.
+- A reader from a `byte[]` or a `ReadOnlyMemory<byte>` puts the window on the caller's own memory. This reader never refills the window.
+- A reader from a stream rents a window and refills it.
 
-`EnsureWithinDocument` is the single place a read is checked against `_readLimit`. Only a malformed length gets there, and consuming those bytes would corrupt whatever follows on the stream, so it throws.
+One window for both readers is better than two code paths. With two paths, a read on a slice can use the bounds of the full array. That class of bug is not possible now.
 
-Keeping every byte come from that one window is deliberate: an alternative source (`ReadOnlySequence<byte>`, `PipeReader`) becomes a change to the refill path plus an adapter, rather than a change to every read method.
+Three rules control the refill:
 
-### Writer buffering
+- **The reader stops at the end of the outermost open document** (`_readLimit`). Without this limit, a reader on a socket can consume the bytes of the next message. It can also stop and wait for a peer that already sent its message and now waits for a reply. `RefillTarget` computes how many bytes the reader can put in the window. If no document is open, the reader takes only the number of bytes that the caller asked for. This is how the reader gets the four-byte length prefix of a document and no more bytes.
+- **A value can be longer than the bytes in the window.** `ReadCString` reads from the window if the window contains the terminator, which is the usual condition. If the window does not contain the terminator, `ReadCStringAcrossRefills` collects the bytes across more than one refill. A string with a length prefix reads in place if the window is large enough for it.
+- **A value can be longer than the window.** `ReadExact` first takes the bytes in the window. Then it reads the other bytes directly into the caller's array. Thus a large binary value never goes through the window.
 
-`BsonWriter` stages bytes in a fixed-size pooled buffer (`BufferSize`, 8 KB) and moves them to the stream through a single `Drain()`. This is a fixed window, not a per-document buffer — writer memory does not scale with document size, and payloads larger than the window go straight to the stream.
+`EnsureWithinDocument` is the one method that compares a read against `_readLimit`. Only a bad length can fail this test. If the reader consumed those bytes, it would damage the data that comes after them on the stream. Thus the method throws an exception.
 
-Three consequences worth knowing:
+All bytes must come from that one window, and this rule has a purpose. To add a different source, such as a `ReadOnlySequence<byte>` or a `PipeReader`, you change the refill path and write an adapter. You do not change each read method.
 
-- **Closing a top-level document drains.** Staging is otherwise observable from outside: callers wrote against write-through semantics before the buffer existed, and holding a finished document back breaks them with no error. Only a document still open stays staged.
-- `Flush()` drains *and* flushes the stream; `Drain()` does not, because flushing the destination every time the window fills would defeat whatever buffering the caller wrapped it in. `Dispose` does what `Flush` does.
-- Back-patching resolves against a logical position counter rather than `Stream.Position`. When a length placeholder is still staged it is patched in the buffer; once drained, patching seeks the stream. Both paths are covered in `BsonWriterBufferingTests`.
+### The writer buffer
 
-Keeping every byte funnelled through that one `Drain()` is deliberate, for the same reason as the reader's window: an alternative destination (`IBufferWriter<byte>`, `PipeWriter`) becomes a change to that method plus an adapter, rather than a change to every write method.
+`BsonWriter` keeps bytes in a buffer of a fixed length (`BufferSize`, 8 KB). One method, `Drain()`, moves those bytes to the stream. The buffer length does not depend on the document. Thus the writer memory does not increase with the document length, and a value that is longer than the buffer goes directly to the stream.
 
-### Size computation
+This design has three results:
 
-`BsonSize` holds the encoded size of every BSON value and mirrors `BsonWriter` one member at a time. The two must change together — `BsonSizeTests` asserts each helper against bytes the writer actually emitted, because a wrong size is only observable as a byte count.
+- **`WriteEndDocument` on the top-level document drains the buffer.** If it did not, a caller could see the buffer from outside. Callers wrote their code before the buffer existed, when each write went directly to the stream. If the writer held a complete document back, that code would fail and give no error. Only an open document stays in the buffer.
+- `Flush()` drains the buffer and then flushes the stream. `Drain()` does not flush the stream. A flush each time the buffer becomes full would prevent the caller's own buffer from doing its work. `Dispose` does the same operations as `Flush`.
+- The writer finds a length placeholder with its own position counter, not with `Stream.Position`. If the placeholder is still in the buffer, the writer changes it in the buffer. If the writer already drained the placeholder, it does a seek on the stream. `BsonWriterBufferingTests` tests both paths.
 
-The generator emits a `Measure{T}Inner` beside each `Write{T}Inner`, plus a `Measure{T}_{Member}Array` helper per array-typed member, named from `EmitScope.MethodPath` so that two models sharing a simple name do not emit it twice. Field names are known at generation time, so element overhead folds to a literal; `BsonSize` members are `const`, so fixed-size values fold with it. Measure bodies accumulate in a `checked` block: a size that wrapped would agree with nothing, and the writer would be told to open a document it cannot describe.
+All bytes must go through that one `Drain()` method. The reason is the same as the reason for the reader window. To add a different destination, such as an `IBufferWriter<byte>` or a `PipeWriter`, you change that one method and write an adapter. You do not change each write method.
 
-Nested documents are measured once, not once per write site. `BsonSizeTable` carries the results: the measure pass reserves a slot per document on the way down and fills it on the way back up, and the write pass reads them back with `Next()` in the same pre-order. Both passes visit members in the same order under the same conditions, so they agree by construction; `Next()` throws rather than returning a wrong length if they ever stop agreeing. Measuring each nested document again where it is written would be O(N·depth), which is free for flat models and quadratic for deeply self-referencing ones.
+### Length computation
 
-On a seekable destination the measure pass does not run at all. `BsonSizeTable.None` stands in — a shared instance whose `Next()` returns 0, which the writer reads as "patch it in later" — so the write pass takes the same code path either way.
+`BsonSize` holds the encoded length of each BSON value. Each of its members agrees with one `BsonWriter` method, and you must change the two types together. `BsonSizeTests` compares each helper with the bytes that the writer wrote. That test is necessary, because you can see a wrong length only as a count of bytes.
 
-`GetSerializedSize` on the generated context is the same measurement exposed publicly, measured into `BsonSizeTable.None` since nothing is going to replay it. There is deliberately no reader-side counterpart: a reader already knows its document's length once it has read the prefix, and no use case has come up that the caller could not serve by reading that prefix itself.
+The generator writes a `Measure{T}Inner` method for each `Write{T}Inner` method. It also writes a `Measure{T}_{Member}Array` helper for each array member. These names come from `EmitScope.MethodPath`, so two models with the same simple name do not get the same method name.
 
-Measure and write are two independent walks of the same object graph, so they can disagree. When they do, `WriteEndDocument` throws instead of emitting a malformed document. `DualPathWriter` routes every generator test through both framing paths and compares bytes, which is what catches divergence — a mismatch is invisible on a `MemoryStream`.
+The generator knows the element names, so the element overhead becomes a literal value. The `BsonSize` members are `const`, so the compiler folds the fixed lengths with it. The measure method bodies use a `checked` block. A length that wrapped would agree with no other length, and the writer would then start a document that it cannot describe.
+
+The measure pass measures each nested document one time. `BsonSizeTable` holds the results. The measure pass keeps a slot for each document when it goes down the object graph, and it fills that slot when it comes back up. The write pass then reads the lengths with `Next()` in the same order.
+
+Both passes read the members in the same order under the same conditions. Thus they always agree. If they do not agree, `Next()` throws an exception instead of a wrong length. A second measurement at each write point would cost O(N·depth). That cost is zero for a flat model, but it is quadratic for a model with many levels that refers to itself.
+
+If the destination can seek, the measure pass does not run. `BsonSizeTable.None` replaces the table. `None` is a shared instance, and its `Next()` returns 0. The writer reads 0 as an unknown length and writes the length later. Thus the write pass uses the same code for both destinations.
+
+`GetSerializedSize` on the context is the same measurement, but it is public. It measures into `BsonSizeTable.None`, because no write pass follows it. There is no equivalent method on the reader. A reader knows the length of its document after it reads the prefix, and a caller who needs that length can read the prefix.
+
+The measure pass and the write pass read the same object graph two times, so they can disagree. If they disagree, `WriteEndDocument` throws an exception instead of a bad document. `DualPathWriter` sends each generator test through both paths and compares the bytes. That test finds a disagreement, which you cannot see on a `MemoryStream`.
 
 ## Type classification
 
-`Map(TypeRefInfo)` resolves a model type to a `BsonMapping`, and every emitter dispatches on that result. The classification order is load-bearing — `byte[]` before arrays in general, enums before the `SpecialType` switch, since an enum's own `SpecialType` is `None` — and exists in that one method rather than being repeated per emitter.
+`Map(TypeRefInfo)` gives a `BsonMapping` for a model type. Each emitter uses that result to select its code. You must not change the order of the tests in `Map`:
 
-Names of the scalar `BsonMapping` members are also load-bearing: emitters build call names from them, so `Int32` yields `BsonWriter.WriteInt32`, `BsonReader.ReadInt32`, and `BsonSize.Int32`. **Adding a scalar BSON type is a `BsonMapping` member, a `Map` case, and matching members on those three types — no emitter changes.** Renaming a member silently breaks code generation; the round-trip tests catch it but do not explain it.
+- `byte[]` comes before the general array test.
+- Enums come before the `SpecialType` switch, because the `SpecialType` of an enum is `None`.
 
-`Binary`, `BinaryMemory`, `Array`, `Nested`, and `Unsupported` are handled case by case instead, because each direction treats them differently — arrays inside arrays are rejected, `ReadOnlyMemory<byte>` has no name-less write overload, and nested documents need framing.
+That order is in one method. It is not in each emitter.
+
+You must also not change the names of the scalar `BsonMapping` members. The emitters build method names from them, so the member `Int32` gives `BsonWriter.WriteInt32`, `BsonReader.ReadInt32`, and `BsonSize.Int32`.
+
+**To add a scalar BSON type, add a `BsonMapping` member, a `Map` case, and the equivalent members on those three types. No emitter needs a change.** A new name for a member breaks the code generation and gives no error. The round-trip tests find the failure, but they do not show the cause.
+
+The `Binary`, `BinaryMemory`, `Array`, `Nested`, and `Unsupported` members have separate code in each emitter, because the read direction and the write direction are different for them:
+
+- An array inside an array is not valid.
+- `ReadOnlyMemory<byte>` has no write overload without a name.
+- A nested document needs its own length prefix and terminator.
 
 ### Buffer-backed reads
 
-A reader constructed from `byte[]` or `ReadOnlyMemory<byte>` points its read window at the original storage rather than renting one, so there is no copy and no refill. `ReadBinaryAsMemory()` can therefore return a slice that aliases caller-owned memory; `ReadBinary()` always returns a copy.
+A reader from a `byte[]` or a `ReadOnlyMemory<byte>` puts its window on the caller's memory instead of a rented window. Thus there is no copy and no refill. `ReadBinaryAsMemory()` can therefore return a slice of the caller's memory, and `ReadBinary()` always returns a copy.
 
-The window is the caller's *slice*, not the array behind it. A `ReadOnlyMemory<byte>` is very often a view into a larger buffer holding other documents, and a read that resolved against the array's bounds could compose a value out of a neighbour's bytes rather than failing.
+The window is the caller's *slice*. It is not the full array. A `ReadOnlyMemory<byte>` is frequently a view of a larger buffer that holds other documents. A read that used the bounds of the array could make a value from the bytes of an adjacent document instead of an error.
 
 ### Numeric conversions
 
-`ReadInt32`, `ReadInt64`, and `ReadDouble` accept all three BSON numeric representations and convert between them. This leniency is intentional: other BSON implementations may choose a different width for the same logical number. Each is a single switch over the accepted set, with the mismatch message in its default arm — a separate type check in front would restate the set the switch already lists, and the two could then disagree.
+`ReadInt32`, `ReadInt64`, and `ReadDouble` accept all three BSON number types and convert between them. This behavior has a purpose: a different BSON tool can use a different width for the same number.
 
-### Skipping
+Each method is one switch across the permitted types, and the error message is in its default arm. A type test before the switch would give the same list of types a second time, and the two lists could then disagree.
 
-`Skip()` covers every type `BsonType` names, including the deprecated ones no accessor reads. That total coverage is the point: generated deserializers skip every field they do not recognise, so a type missing here is not one unreadable field but a document that cannot be read past that point. Adding a member to `BsonType` means adding a case, and the default arm rejects a byte that names no type at all, whose length is unknowable.
+### The Skip method
 
-### Encoding details
+`Skip()` accepts each type that `BsonType` names, and this includes the deprecated types that no accessor reads. Full coverage is necessary. Generated deserializers skip each element that they do not know. If `Skip()` does not know a type, the result is not one bad element. The reader cannot read the document after that element.
 
-- `DateTime` is stored as UTC milliseconds since the Unix epoch. Local values are converted to UTC; unspecified values are treated as UTC. Sub-millisecond precision is lost.
-- `Guid` uses binary subtype `0x04` with the byte order returned by .NET's `Guid.ToByteArray()`. This differs from RFC 4122 byte order.
-- Legacy binary subtype `0x02` contains a second length prefix. Both reading and skipping must account for it.
-- Modern targets use span-based APIs behind `NET6_0_OR_GREATER`; `netstandard2.0` uses allocating fallbacks.
-- Field names are stack-allocated when their UTF-8 representation is at most 256 bytes.
+If you add a member to `BsonType`, add a case to `Skip()`. The default arm rejects a byte that names no type, because the length of such a value is unknown.
 
-Changes to these behaviors can affect interoperability and need byte-level tests.
+### Format details
+
+- MiniBson writes a `DateTime` as UTC milliseconds after the Unix epoch. It converts a local value to UTC, and it reads an unspecified value as UTC. A value smaller than one millisecond is lost.
+- A `Guid` uses binary subtype `0x04`. The byte order is the order from `Guid.ToByteArray()` in .NET, which is different from the RFC 4122 order.
+- The old binary subtype `0x02` has a second length prefix. The read code and the skip code must both include it.
+- New targets use the span API behind `NET6_0_OR_GREATER`. The `netstandard2.0` target uses a fallback that allocates memory.
+- MiniBson puts an element name on the stack if its UTF-8 form is 256 bytes or less.
+
+A change to these rules can stop other BSON tools from reading the data. Write a byte-level test for each such change.
 
 ## Generator design
 
-A partial class with one or more `[BsonSerializable(typeof(T))]` attributes becomes a serialization context with:
+A partial class with one or more `[BsonSerializable(typeof(T))]` attributes becomes a context with these methods:
 
 ```csharp
 void Serialize(object input, BsonWriter writer);
 object? Deserialize(BsonReader reader, Type type);
+int GetSerializedSize(object input);
 ```
 
-The generated API accepts readers and writers—not streams—so callers choose the input form and control resource lifetime.
+The generated API accepts a reader or a writer. It does not accept a stream. Thus the caller selects the input form and controls the lifetime of the resources.
 
 ### Type discovery and dispatch
 
-- Top-level dispatch uses exact types. There is no base-class or interface dispatch.
-- Registered models are valid top-level values.
-- Models reached through properties are generated recursively, but remain nested-only unless explicitly registered.
-- Self-referencing models are supported.
+- The top-level dispatch uses the exact runtime type. There is no dispatch on a base class or an interface.
+- A registered model is a valid top-level value.
+- The generator finds more models through the properties and writes code for them. Such a model is valid only as a nested document. To use it as a top-level value, register it.
+- A model can refer to itself.
 
 ### Property discovery and schema evolution
 
-Public readable instance properties are collected from the most-derived type toward its base types. The first occurrence of a name wins, which gives hidden derived properties precedence. This order also determines emitted field order, so changing discovery order changes the serialized byte sequence.
+The generator collects the public instance properties that it can read. It starts at the most derived type and continues to the base types. If a name occurs two times, the generator keeps the first property. Thus a derived property replaces the property that it hides.
 
-Deserialization switches on field names. Unknown fields are skipped and absent fields keep their defaults; MiniBson does not enforce required members. Perform required-field validation at a higher layer.
+That order is also the order of the elements on the wire. You must not change it, because a different order gives different bytes.
 
-Classes are reconstructed with an object initializer and therefore need an accessible parameterless constructor plus public `set` or `init` accessors. Records are reconstructed through their positional constructor and must not add unmatched body properties.
+A deserializer switches on the element names. It skips an element that it does not know, and a property with no element keeps its default value. MiniBson does not enforce required members. Test for required properties in your own code.
+
+The generator makes a class with an object initializer. Thus the class needs a parameterless constructor that the generator can use, and each property needs a public `set` or `init` accessor. The generator makes a record with its positional constructor. A record must not add a property in its body that the constructor does not accept.
 
 ### Unsupported models
 
-The generator reports `MINIBSON001` for members without a read/write mapping, including unsupported collections, jagged or multidimensional arrays, `decimal`, and properties that cannot be assigned during deserialization. Generated code also contains a throwing runtime fallback. Suppressing the diagnostic does not make the model serializable.
+The generator reports `MINIBSON001` for a property that has no read and write mapping. Such a property is one of these:
 
-A context declaration without `partial` is currently ignored without a diagnostic.
+- A collection that MiniBson does not support.
+- A jagged array or a multidimensional array.
+- A `decimal` value.
+- A property that the deserializer cannot set.
 
-Generated member names come from `GetSafeMethodName`, which builds an identifier from the *fully qualified* type name. Every helper for every model lands in one partial class, so a name derived from the simple name makes two models called `Order` in different namespaces emit the same members — a CS0111 in a file the user cannot edit. `EmitScope.MethodPath` exists for the same reason: `MemberPath` names a member to the user in a diagnostic and keeps simple names for readability, so identifiers cannot be derived from it.
+The generated code also contains a fallback that throws an exception. If you suppress the diagnostic, MiniBson still cannot serialize the model.
+
+The generator ignores a context that is not `partial`, and it gives no diagnostic for this.
+
+`GetSafeMethodName` makes the generated member names. It builds an identifier from the *fully qualified* type name.
+
+All helpers for all models go into one partial class. If a name came from the simple name, two models with the name `Order` in different namespaces would give two members with the same name. The result is error CS0111 in a file that the user cannot change.
+
+`EmitScope.MethodPath` has the same purpose. `MemberPath` shows a member to the user in a diagnostic and keeps the simple names, because they are easier to read. Thus you must not build an identifier from `MemberPath`.
 
 ### Incremental pipeline
 
-The generator begins with `ForAttributeWithMetadataName` and passes value-equal records through the incremental pipeline: `ContextClassInfo`, `TypeInfo`, `TypeRefInfo`, and `EquatableList<T>`.
+The generator starts with `ForAttributeWithMetadataName`. It then sends records with value equality through the incremental pipeline. Those records are `ContextClassInfo`, `TypeInfo`, `TypeRefInfo`, and `EquatableList<T>`.
 
-Do not store `ISymbol`, `SyntaxNode`, or other compilation-owned objects in that model. They compare by reference and retain compilations, defeating incremental caching. Arrays and `ImmutableArray<T>` also compare by reference, which is why `EquatableList<T>` exists. Source locations are captured in the value-based `LocationInfo` type for the same reason.
+Do not put an `ISymbol`, a `SyntaxNode`, or another object of the compilation in that model. These objects compare by reference and hold the compilation in memory, and they stop the incremental cache. An array and an `ImmutableArray<T>` also compare by reference, which is the reason for `EquatableList<T>`. The `LocationInfo` type holds a source location as a value for the same reason.
 
 ## Test suite
 
-The test suite is organized by responsibility:
+Each test file has one responsibility:
 
 | File | Focus |
 | --- | --- |
-| `BsonWriterReaderTests.cs` | Low-level round trips, validation, skipping, disposal, and zero-copy binary reads |
-| `BsonSizeTests.cs` | Every `BsonSize` helper checked against bytes the writer emitted |
-| `BsonWriterBufferingTests.cs` | Staging-buffer boundaries, oversized payloads, and back-patching after a flush |
-| `BsonWriterKnownLengthTests.cs` | Caller-supplied lengths, non-seekable streams, and the length-mismatch check |
-| `BsonReaderNonSeekableTests.cs` | Reading and skipping without seeking, short reads, and exact document consumption |
-| `BsonReaderWindowTests.cs` | What the read window refuses to read past: corrupt lengths, slice bounds, and read-ahead across sequential documents |
-| `BsonGeneratorTests.cs` | End-to-end generated serialization for objects, records, inheritance, nullability, and arrays |
-| `BsonGeneratorPrimitiveTests.cs` | Scalar, nullable scalar, and scalar-array mappings |
+| `BsonWriterReaderTests.cs` | Low-level round trips, validation, the `Skip` method, disposal, and zero-copy binary reads |
+| `BsonSizeTests.cs` | Each `BsonSize` helper against the bytes that the writer wrote |
+| `BsonWriterBufferingTests.cs` | Buffer limits, values longer than the buffer, and a length written after a drain |
+| `BsonWriterKnownLengthTests.cs` | Lengths from the caller, streams that cannot seek, and the length test |
+| `BsonReaderNonSeekableTests.cs` | Reads and skips without a seek, short reads, and exact document limits |
+| `BsonReaderWindowTests.cs` | The limits of the read window: bad lengths, slice bounds, and reads across sequential documents |
+| `BsonGeneratorTests.cs` | Generated serialization for objects, records, inheritance, null values, and arrays |
+| `BsonGeneratorPrimitiveTests.cs` | Scalar, nullable scalar, and scalar array mappings |
 | `BsonGeneratorEnumTests.cs` | Enum underlying types, nullable enums, arrays, and nested enums |
-| `BsonGeneratorSizeTests.cs` | Generated `GetSerializedSize` against the bytes actually written |
-| `BsonGeneratorDiagnosticTests.cs` | Direct Roslyn assertions for `MINIBSON001` and valid generator output |
-| `MetsysCrossTests.cs` | Byte-level compatibility assertions derived from Metsys.Bson |
-| `NewtonsoftBsonCrossTests.cs` | Read and write interoperability with `Newtonsoft.Json.Bson` |
+| `BsonGeneratorSizeTests.cs` | Generated `GetSerializedSize` against the bytes that the writer wrote |
+| `BsonGeneratorDiagnosticTests.cs` | Roslyn assertions for `MINIBSON001` and for valid generator output |
+| `MetsysCrossTests.cs` | Byte-level compatibility with Metsys.Bson |
+| `NewtonsoftBsonCrossTests.cs` | Read and write compatibility with `Newtonsoft.Json.Bson` |
 
-`NonSeekableStream.cs`, `DualPathWriter.cs`, and `DualPathReader.cs` are shared helpers rather than test classes.
+`NonSeekableStream.cs`, `DualPathWriter.cs`, and `DualPathReader.cs` are shared helpers. They are not test classes.
 
-`NonSeekableStream` refuses to seek or report a position in either direction, and its `chunkSize` caps how much a single `Read` returns — real network streams hand back short reads, and assuming one call fills the request is an easy way to get this wrong.
+`NonSeekableStream` cannot seek and cannot report a position. Its `chunkSize` parameter limits the number of bytes that one `Read` returns. A real network stream returns short reads, and code that expects one call to fill the request is a common error.
 
-`DualPathWriter` serializes twice — patched and precomputed — and asserts the results are byte-identical. `DualPathReader` deserializes twice, seekable and not, and `BsonGeneratorTests` compares the two by re-encoding them, since most test models are classes without value equality. The generator suites route through both, so every model they cover validates all four paths.
+`DualPathWriter` serializes a value two times. It uses a length that it writes later, and then a length that it computes first. It then asserts that the two results have the same bytes.
 
-When changing the wire representation, add a byte-level assertion. A round-trip test is insufficient because matching reader and writer bugs can still round-trip successfully. The same applies to sizes: only a byte count catches a wrong one.
+`DualPathReader` deserializes a value two times. It uses a stream that can seek, and then a stream that cannot seek. `BsonGeneratorTests` compares the two results with a second serialization, because most test models are classes without value equality.
 
-When adding a supported model shape, cover both serialization directions and place the test beside the closest existing category. Diagnostic tests construct the generator in-process and should cover new rejection paths.
+The generator test files use both helpers. Thus each model in those files tests all four paths.
 
-## Packaging
+When you change the wire format, add a byte-level assertion. A round-trip test is not sufficient. A reader bug and a writer bug that agree can still give a correct round trip. The same rule applies to lengths: only a count of bytes finds a wrong one.
 
-`MiniBson/MiniBson.csproj` produces two packages from the same runtime sources.
+When you add a new model shape, test both directions. Put the test in the file with the nearest category. The diagnostic tests run the generator in the test process. Add a test there for each new rejection.
 
-Build the solution in Release first so the generator assembly exists in the configuration being packed:
+## Packages
+
+`MiniBson/MiniBson.csproj` makes two packages from the same runtime sources.
+
+First, build the solution in Release. The generator assembly must exist in the configuration that you pack:
 
 ```bash
 dotnet build -c Release
 ```
 
-Then create the regular assembly package:
+Then make the assembly package:
 
 ```bash
 dotnet pack MiniBson/MiniBson.csproj -c Release --no-build
 ```
 
-Or create the source-only package:
+Or make the source-only package:
 
 ```bash
 dotnet pack MiniBson/MiniBson.csproj -c Release --no-build -p:MiniBsonPackageAsSource=true
@@ -222,30 +270,30 @@ dotnet pack MiniBson/MiniBson.csproj -c Release --no-build -p:MiniBsonPackageAsS
 
 ### Regular package
 
-The `MiniBson` package contains the runtime assembly and places `MiniBson.Generator.dll` under `analyzers/dotnet/cs`. The project defines `MINIBSON_PUBLIC`, so runtime types are public.
+The `MiniBson` package contains the runtime assembly. It puts `MiniBson.Generator.dll` in `analyzers/dotnet/cs`. The project defines `MINIBSON_PUBLIC`, so the runtime types are public.
 
 ### Source-only package
 
-The `MiniBson.Source` package includes the runtime `.cs` files as `contentFiles`. Its MSBuild files behave as follows:
+The `MiniBson.Source` package includes the runtime `.cs` files as `contentFiles`. Its MSBuild files do these operations:
 
-- `build/MiniBson.Source.props` marks source inclusion and defines `MINIBSON_PUBLIC` only when the consumer sets `MiniBsonPublic=true`.
-- `build/MiniBson.Source.targets` adds source files to direct consumers.
-- `buildTransitive/MiniBson.Source.targets` is intentionally empty, preventing downstream projects from compiling another copy.
+- `build/MiniBson.Source.props` includes the sources. It defines `MINIBSON_PUBLIC` only if the consumer sets `MiniBsonPublic=true`.
+- `build/MiniBson.Source.targets` adds the source files to a direct consumer.
+- `buildTransitive/MiniBson.Source.targets` is empty. An empty file stops a downstream project from a second copy of the sources.
 
-The package suppresses normal build output and dependencies, but still includes the generator analyzer.
+The package does not include the usual build output or the dependencies, but it does include the generator analyzer.
 
 ### Local package cache
 
-After packing, `UpdateLocalNugetCache` expands the package into the global NuGet cache as `9999.0.0-localbuild`. This supports local consumer projects without a separate feed and is not part of publishing a release.
+After a pack, `UpdateLocalNugetCache` puts the package in the global NuGet cache as version `9999.0.0-localbuild`. This lets a local consumer project use the package without a separate feed. It is not a step in a release.
 
-Packing mutates that cache entry, so do not treat a successful pack alone as release validation. Test the produced `.nupkg` contents and, when packaging behavior changes, consume both package variants from a clean sample project.
+A pack changes that cache entry. Thus a successful pack alone is not sufficient validation for a release. Examine the contents of the `.nupkg` file. If you change how a package is built, use both packages from a new sample project.
 
 ## Release checklist
 
-There is currently no CI or automated versioning. A release therefore requires manual verification:
+This repository has no CI system and no automatic version numbers. Thus you must do these steps manually for a release:
 
 1. Update `<Version>` in `MiniBson/MiniBson.csproj`.
-2. Build and test with a compatible .NET 10 or later SDK.
-3. Pack both package variants in Release.
-4. Inspect both `.nupkg` files and test them from clean consumer projects.
-5. Publish the intended packages through the normal NuGet release process.
+2. Build and test with the .NET 10 SDK or a later version.
+3. Pack both packages in Release.
+4. Examine both `.nupkg` files. Test them from new consumer projects.
+5. Publish the packages with the usual NuGet release process.

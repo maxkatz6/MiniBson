@@ -1095,10 +1095,10 @@ public sealed class BsonGeneratorTests
     }
 
     /// <summary>
-    /// A reference property not annotated as nullable can still hold one. There is no string,
-    /// binary, or document encoding of null, so both passes have to agree to write BSON Null
-    /// for it — the measure pass reporting a size the write pass then cannot produce is what a
-    /// mismatch looks like from outside.
+    /// A reference property with no nullable annotation can still hold a null. BSON has no
+    /// encoding of a null as a string, as binary data, or as a document. Thus both passes must
+    /// agree to write BSON Null for it. In a disagreement, the measure pass gives a length that
+    /// the write pass cannot then write.
     /// </summary>
     [TestMethod]
     public void NullInANonNullableReferencePropertyIsWrittenAsNull()

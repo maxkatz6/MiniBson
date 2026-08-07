@@ -3,14 +3,14 @@ using Microsoft.CodeAnalysis.Text;
 
 namespace MiniBson.Generator;
 
-// The equatable snapshot the incremental pipeline caches on. Everything here holds values
-// rather than Roslyn symbols, so a compilation that produces the same model short-circuits
-// before any code is emitted. Add a member only if an emitter reads it: an unread field
-// still takes part in equality and can only invalidate the cache for no benefit.
+// The snapshot with value equality that the incremental pipeline caches. Each type here holds
+// values and not Roslyn symbols. Thus a compilation that gives the same model stops before the
+// generator writes any code. Add a member only if an emitter reads it. A member that no emitter
+// reads is still part of the equality test, and it can only make the cache invalid.
 
 /// <summary>
-/// Equatable stand-in for <see cref="Location"/>. Storing a real Location in the
-/// incremental model would root a SyntaxTree and defeat caching.
+/// A replacement for <see cref="Location"/> with value equality. A real Location in the
+/// incremental model keeps a SyntaxTree in memory and stops the cache.
 /// </summary>
 internal sealed record LocationInfo(string FilePath, TextSpan TextSpan, LinePositionSpan LineSpan)
 {
@@ -39,11 +39,12 @@ internal sealed record TypeInfo(
     bool IsValueType,
     EquatableList<PropertyInfo> Properties);
 
+// IsSettable is true when an object initializer can set the property, that is when the property
+// has a public set accessor or a public init accessor.
 internal sealed record PropertyInfo(
     string Name,
     TypeRefInfo Type,
     LocationInfo? Location,
-    /// <summary>Assignable from an object initializer (has a public set or init accessor).</summary>
     bool IsSettable);
 
 internal sealed record TypeRefInfo(

@@ -4,13 +4,14 @@ using MiniBson;
 namespace MiniBson.Tests;
 
 /// <summary>
-/// Skipping types the reader has no accessor for. Generated deserializers skip every field
-/// they do not recognise, so a type missing from <see cref="BsonReader.Skip"/> is not one
-/// unreadable field — it is a document that cannot be read past that point at all.
+/// A skip across each type that the reader has no accessor for. Generated deserializers skip
+/// each element that they do not know. Thus a type that is absent from
+/// <see cref="BsonReader.Skip"/> is not one bad element. The reader cannot read the document
+/// after that element.
 /// </summary>
 /// <remarks>
-/// The documents here are assembled byte by byte, because <see cref="BsonWriter"/> cannot
-/// write the deprecated types this covers.
+/// These tests build each document one byte at a time, because <see cref="BsonWriter"/> cannot
+/// write the deprecated types here.
 /// </remarks>
 [TestClass]
 public sealed class BsonReaderSkipTests
@@ -29,7 +30,7 @@ public sealed class BsonReaderSkipTests
 
     private static byte[] CString(string value) => [.. Encoding.UTF8.GetBytes(value), 0];
 
-    /// <summary>A length-prefixed string; the declared length counts the terminator.</summary>
+    /// <summary>A string with a length prefix. That length includes the terminator.</summary>
     private static byte[] String(string value)
     {
         var bytes = Encoding.UTF8.GetBytes(value);
@@ -41,7 +42,7 @@ public sealed class BsonReaderSkipTests
     private static byte[] Int32Element(string name, int value) =>
         [.. Element(BsonType.Int32, name), .. BitConverter.GetBytes(value)];
 
-    /// <summary>A namespace string followed by a 12-byte ObjectId.</summary>
+    /// <summary>A namespace string and then a 12-byte ObjectId.</summary>
     private static byte[] DbPointer(string name, string collection) =>
         [.. Element(BsonType.DBPointer, name), .. String(collection), .. SampleObjectId];
 
@@ -51,9 +52,9 @@ public sealed class BsonReaderSkipTests
         [.. Element(BsonType.Decimal128, name), .. new byte[16]];
 
     /// <summary>
-    /// Reads the element after a skipped one, on a seekable stream and a non-seekable one.
-    /// Skipping seeks where it can and consumes bytes where it cannot, so a wrong length is
-    /// visible on only one of the two.
+    /// Reads the element after a skipped element, on a stream that can seek and on a stream
+    /// that cannot. A skip does a seek where it can, and it consumes the bytes where it cannot.
+    /// Thus you see a wrong length on only one of the two streams.
     /// </summary>
     private static void AssertSkipsTo(byte[] document, string expectedName, int expectedValue)
     {
@@ -106,8 +107,8 @@ public sealed class BsonReaderSkipTests
     }
 
     /// <summary>
-    /// A byte that names no type has no length either, so skipping it would parse everything
-    /// after it against the wrong offsets.
+    /// A byte that names no type also has no length. Thus a skip across it makes the reader use
+    /// the wrong offsets for each byte after it.
     /// </summary>
     [TestMethod]
     public void AnUnknownTypeByteIsRejected()

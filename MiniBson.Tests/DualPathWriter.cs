@@ -3,14 +3,15 @@ using MiniBson;
 namespace MiniBson.Tests;
 
 /// <summary>
-/// Serializes twice — once to a seekable stream, where document lengths are patched in
-/// afterwards, and once to a non-seekable stream, where generated code must compute them up
-/// front — and asserts both produce identical bytes.
+/// Serializes a value two times and asserts that the two results have the same bytes. The first
+/// serialization uses a stream that can seek, where the writer writes each document length
+/// later. The second uses a stream that cannot seek, where the generated code computes each
+/// length first.
 /// </summary>
 /// <remarks>
-/// Measure and write are independent walks of the same object graph, so they can disagree, and
-/// a disagreement is invisible on a <see cref="MemoryStream"/>. Every generator test routes
-/// through here for that reason.
+/// The measure pass and the write pass read the same object graph separately, so they can
+/// disagree. You cannot see a disagreement on a <see cref="MemoryStream"/>. Thus each generator
+/// test uses this helper.
 /// </remarks>
 internal static class DualPathWriter
 {

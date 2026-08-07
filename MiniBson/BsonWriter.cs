@@ -7,15 +7,12 @@ using System.Text;
 
 namespace MiniBson;
 
-#if MINIBSON_PUBLIC
 /// <summary>
 /// A low-level, forward-only BSON writer.
 /// </summary>
+#if MINIBSON_PUBLIC
 public sealed class BsonWriter : IDisposable
 #else
-/// <summary>
-/// A low-level, forward-only BSON writer.
-/// </summary>
 internal sealed class BsonWriter : IDisposable
 #endif
 {
@@ -24,20 +21,22 @@ internal sealed class BsonWriter : IDisposable
     private readonly Stream _stream;
     private readonly bool _leaveOpen;
 
-    // Asked once, in the constructor, because everything depending on seekability — the origin
-    // below, whether lengths have to be supplied, whether a placeholder can be revisited — has
-    // to agree, and a stream is free to change its answer between calls.
+    // The constructor asks the stream one time. Three things use this answer: the origin below,
+    // the rule for supplied lengths, and the method that writes a placeholder later. They must
+    // agree, and a stream can give a different answer to each call.
     private readonly bool _canSeek;
 
-    // Offset this writer started at, so a stream positioned mid-file still resolves.
+    // The offset where this writer started. Thus a stream that starts in the middle of a file
+    // still gives correct positions.
     private readonly long _origin;
 
-    // A fixed-size window, not a per-document buffer: memory does not grow with document size.
+    // A buffer of a fixed length, not one buffer for each document. Thus the memory does not
+    // increase with the document length.
     private byte[] _buffer = ArrayPool<byte>.Shared.Rent(BufferSize);
     private int _staged;
 
-    // Total bytes written, staged and flushed alike. Used instead of Stream.Position, which
-    // a non-seekable stream cannot report.
+    // A count of all bytes that the writer wrote, in the buffer and on the stream. The writer
+    // uses this count instead of Stream.Position, which a stream that cannot seek does not give.
     private long _position;
 
     private readonly Stack<DocumentFrame> _openDocuments = new();
@@ -49,7 +48,7 @@ internal sealed class BsonWriter : IDisposable
     {
         public long StartPosition;
 
-        /// <summary>Length supplied by the caller, or 0 when the length is to be patched in.</summary>
+        /// <summary>The length from the caller, or 0 when the writer writes the length later.</summary>
         public int ExpectedLength;
     }
 
@@ -62,35 +61,36 @@ internal sealed class BsonWriter : IDisposable
     }
 
     /// <summary>
-    /// Indicates whether documents must be opened with a known length. This is true when the
-    /// destination cannot be seeked, because the length placeholder could never be revisited.
+    /// True when you must start each document with a known length. This is true when the
+    /// destination cannot seek, because the writer can never go back to a placeholder.
     /// </summary>
     public bool RequiresKnownLength => !_canSeek;
 
     /// <summary>
-    /// Writes the start of a BSON document whose length is not yet known. The length is
-    /// written as a placeholder and patched in by <see cref="WriteEndDocument"/>, which
-    /// requires a seekable stream.
+    /// Writes the start of a BSON document with an unknown length. The writer writes a
+    /// placeholder, and <see cref="WriteEndDocument"/> writes the correct length there. This
+    /// method needs a stream that can seek.
     /// </summary>
     /// <exception cref="InvalidOperationException">
-    /// The stream cannot be seeked. Use <see cref="WriteStartDocument(int)"/> instead.
+    /// The stream cannot seek. Use <see cref="WriteStartDocument(int)"/> in its place.
     /// </exception>
     public void WriteStartDocument() => WriteStartDocument(0);
 
     /// <summary>
-    /// Writes the start of a BSON document of known length, so nothing has to be patched
-    /// afterwards. This is the only form that works on a stream that cannot be seeked.
+    /// Writes the start of a BSON document with a known length. Thus the writer writes no
+    /// length later. This is the only form that works with a stream that cannot seek.
     /// </summary>
     /// <param name="documentLength">
-    /// The complete encoded length of the document, including the four-byte length prefix and
-    /// the trailing null terminator, as computed by <see cref="BsonSize"/>. Pass 0 when the
-    /// length is unknown, which falls back to patching and requires a seekable stream.
+    /// The full encoded length of the document. It includes the four-byte length prefix and
+    /// the null terminator at the end. <see cref="BsonSize"/> computes it. Give 0 when the
+    /// length is unknown. The writer then writes the length later and needs a stream that can
+    /// seek.
     /// </param>
     /// <exception cref="ArgumentOutOfRangeException">
-    /// <paramref name="documentLength"/> is negative, or is too small to be a valid document.
+    /// <paramref name="documentLength"/> is negative, or it is too small for a valid document.
     /// </exception>
     /// <exception cref="InvalidOperationException">
-    /// The length is unknown and the stream cannot be seeked.
+    /// The length is unknown and the stream cannot seek.
     /// </exception>
     public void WriteStartDocument(int documentLength)
     {
@@ -99,10 +99,10 @@ internal sealed class BsonWriter : IDisposable
     }
 
     /// <summary>
-    /// Opens a document whose length has already been validated. The named and positional
-    /// forms below validate before emitting their element header, so that a rejected length
-    /// leaves nothing behind; going back through <see cref="WriteStartDocument(int)"/> would
-    /// only check it a second time.
+    /// Opens a document with a length that the writer already tested. The named forms and the
+    /// positional forms below test the length before they write the element header. Thus a
+    /// length that fails leaves no bytes on the destination. A call to
+    /// <see cref="WriteStartDocument(int)"/> would test the length a second time.
     /// </summary>
     private void BeginDocument(int documentLength)
     {
@@ -112,14 +112,14 @@ internal sealed class BsonWriter : IDisposable
             ExpectedLength = documentLength,
         });
 
-        // Either the real length, or a placeholder patched by WriteEndDocument.
+        // This is the correct length, or a placeholder that WriteEndDocument fills in.
         WriteInt32Raw(documentLength);
     }
 
     /// <summary>
-    /// Rejects a document length this writer could not honour. Separate from
-    /// <see cref="WriteStartDocument(int)"/> so callers that emit an element header first can
-    /// fail before writing anything.
+    /// Rejects a document length that this writer cannot accept. It is separate from
+    /// <see cref="WriteStartDocument(int)"/>, so a caller that writes an element header first
+    /// can fail before it writes any byte.
     /// </summary>
     private void ValidateDocumentLength(int documentLength)
     {
@@ -140,12 +140,12 @@ internal sealed class BsonWriter : IDisposable
     }
 
     /// <summary>
-    /// Writes the end of a BSON document. Closing the outermost document also drains the
-    /// staging buffer, so a complete document is always on the destination.
+    /// Writes the end of a BSON document. On the outermost document, this method also drains
+    /// the buffer. Thus a complete document is always on the destination.
     /// </summary>
     /// <exception cref="InvalidOperationException">
-    /// The document was opened with a length that does not match the bytes actually written,
-    /// or it grew past what a BSON length prefix can express.
+    /// The length at the start of the document does not agree with the bytes that the writer
+    /// wrote, or the document is longer than a BSON length prefix can express.
     /// </exception>
     public void WriteEndDocument()
     {
@@ -154,8 +154,8 @@ internal sealed class BsonWriter : IDisposable
         var frame = _openDocuments.Pop();
         var length64 = _position - frame.StartPosition;
 
-        // The prefix is an int32, so a longer document could not describe itself. Checked
-        // here rather than at the cast, which would wrap into a plausible-looking length.
+        // The prefix is an int32, so a longer document cannot give its own length. The test is
+        // here and not at the cast, because the cast would wrap and give an incorrect length.
         if (length64 > int.MaxValue)
         {
             throw new InvalidOperationException(
@@ -169,8 +169,8 @@ internal sealed class BsonWriter : IDisposable
         {
             PatchLength(frame.StartPosition, length);
         }
-        // Not conditional on build configuration: a wrong length would otherwise produce a
-        // silently malformed document.
+        // This test runs in each build configuration. Without it, a wrong length gives a bad
+        // document and no error.
         else if (frame.ExpectedLength != length)
         {
             throw new InvalidOperationException(
@@ -178,29 +178,30 @@ internal sealed class BsonWriter : IDisposable
                 "The computed size does not match the serialized value.");
         }
 
-        // A closed top-level document is complete, so staging it no longer buys anything and
-        // holding it back would surprise a caller reading the destination.
+        // A closed top-level document is complete. The buffer gives no advantage now, and a
+        // caller that reads the destination does not expect an incomplete document.
         if (_openDocuments.Count == 0)
             Drain();
     }
 
     /// <summary>
-    /// Fills in the length placeholder written by <see cref="WriteStartDocument()"/>.
+    /// Fills in the length placeholder from <see cref="WriteStartDocument()"/>.
     /// </summary>
     private void PatchLength(long startPosition, int length)
     {
-        // Offset of _buffer[0] within the logical byte sequence.
+        // The offset of _buffer[0] in the full byte sequence.
         var bufferOrigin = _position - _staged;
 
         if (startPosition >= bufferOrigin)
         {
-            // Still staged. Stage() never splits a scalar, so all four bytes are contiguous.
+            // The placeholder is still in the buffer. Stage() never divides a scalar, so the
+            // four bytes are adjacent.
             BinaryPrimitives.WriteInt32LittleEndian(
                 _buffer.AsSpan((int)(startPosition - bufferOrigin), 4), length);
             return;
         }
 
-        // The placeholder is already on the stream; reaching it requires seeking.
+        // The placeholder is already on the stream, so the writer must do a seek to reach it.
         Drain();
         BinaryPrimitives.WriteInt32LittleEndian(_buffer.AsSpan(0, 4), length);
         _stream.Position = _origin + startPosition;
@@ -211,14 +212,14 @@ internal sealed class BsonWriter : IDisposable
     /// <summary>
     /// Writes the start of a BSON array.
     /// </summary>
-    /// <param name="name">Element name.</param>
+    /// <param name="name">The element name.</param>
     /// <param name="documentLength">
-    /// The complete encoded length of the array document, or 0 when it is unknown. See
+    /// The full encoded length of the array document, or 0 when it is unknown. See
     /// <see cref="WriteStartDocument(int)"/> and <see cref="BsonSize.ArrayOverhead"/>.
     /// </param>
     public void WriteStartArray(string name, int documentLength = 0)
     {
-        // Before the element header, so a rejected length leaves nothing behind to orphan.
+        // This test is before the element header. Thus a length that fails leaves no bytes.
         ValidateDocumentLength(documentLength);
 
         WriteType(BsonType.Array);
@@ -228,8 +229,8 @@ internal sealed class BsonWriter : IDisposable
     }
 
     /// <summary>
-    /// Starts numbering a new array's elements from zero, keeping the enclosing array's
-    /// counter for <see cref="WriteEndArray"/> to restore.
+    /// Starts the element numbers of a new array at zero. It keeps the counter of the outer
+    /// array, and <see cref="WriteEndArray"/> puts that counter back.
     /// </summary>
     private void PushArrayScope()
     {
@@ -242,8 +243,8 @@ internal sealed class BsonWriter : IDisposable
     /// </summary>
     public void WriteEndArray()
     {
-        // Restored even when the length check rejects the document, so a caller that handles
-        // that exception does not go on numbering the enclosing array from the wrong base.
+        // The writer puts the counter back even when the length test rejects the document. Thus
+        // a caller that catches that exception continues the outer array at the correct number.
         try
         {
             WriteEndDocument();
@@ -255,16 +256,16 @@ internal sealed class BsonWriter : IDisposable
     }
 
     /// <summary>
-    /// Writes a nested document field.
+    /// Writes a nested document element.
     /// </summary>
-    /// <param name="name">Element name.</param>
+    /// <param name="name">The element name.</param>
     /// <param name="documentLength">
-    /// The complete encoded length of the nested document, or 0 when it is unknown.
+    /// The full encoded length of the nested document, or 0 when it is unknown.
     /// See <see cref="WriteStartDocument(int)"/>.
     /// </param>
     public void WriteStartDocument(string name, int documentLength = 0)
     {
-        // Before the element header, so a rejected length leaves nothing behind to orphan.
+        // This test is before the element header. Thus a length that fails leaves no bytes.
         ValidateDocumentLength(documentLength);
 
         WriteType(BsonType.Document);
@@ -332,7 +333,7 @@ internal sealed class BsonWriter : IDisposable
     }
 
     /// <summary>
-    /// Writes a DateTime value as BSON DateTime (UTC milliseconds since Unix epoch).
+    /// Writes a DateTime value as a BSON DateTime, in UTC milliseconds after the Unix epoch.
     /// </summary>
     public void WriteDateTime(string name, DateTime value)
     {
@@ -375,7 +376,7 @@ internal sealed class BsonWriter : IDisposable
     {
         if (subType == BsonBinarySubType.BinaryOld)
         {
-            // Old binary format includes an extra length prefix
+            // The old binary format has one more length prefix.
             WriteInt32Raw(value.Length + 4);
             WriteByteRaw((byte)subType);
             WriteInt32Raw(value.Length);
@@ -390,7 +391,7 @@ internal sealed class BsonWriter : IDisposable
     }
 
     /// <summary>
-    /// Writes a GUID as binary with UUID subtype.
+    /// Writes a GUID as binary data with the UUID subtype.
     /// </summary>
     public void WriteGuid(string name, Guid value)
     {
@@ -430,7 +431,7 @@ internal sealed class BsonWriter : IDisposable
     }
 
     /// <summary>
-    /// Writes a BSON timestamp (used internally by MongoDB).
+    /// Writes a BSON timestamp. MongoDB uses this type internally.
     /// </summary>
     public void WriteTimestamp(string name, uint increment, uint timestamp)
     {
@@ -440,18 +441,18 @@ internal sealed class BsonWriter : IDisposable
         WriteUInt32Raw(timestamp);
     }
 
-    // Array element writers. BSON names array elements with their decimal index, so each
-    // writes the same value as its named counterpart behind a positional header.
+    // The array element writers. BSON gives each array element a decimal index as its name.
+    // Thus each method writes the same value as its named equivalent, but with an index header.
 
     /// <summary>
-    /// Writes the next element's name straight to the buffer as ASCII digits, so element
-    /// names cost no allocation.
+    /// Writes the name of the next element directly to the buffer as ASCII digits. Thus an
+    /// element name allocates no memory.
     /// </summary>
     private void WriteNextArrayKey()
     {
         var index = _arrayIndex++;
 
-        // int.MaxValue is 10 digits, filled from the least significant end.
+        // int.MaxValue has 10 digits. The code fills them from the last digit.
         Span<byte> digits = stackalloc byte[10];
         var start = digits.Length;
         do
@@ -558,12 +559,12 @@ internal sealed class BsonWriter : IDisposable
     /// Writes a nested document array element.
     /// </summary>
     /// <param name="documentLength">
-    /// The complete encoded length of the nested document, or 0 when it is unknown.
+    /// The full encoded length of the nested document, or 0 when it is unknown.
     /// See <see cref="WriteStartDocument(int)"/>.
     /// </param>
     public void WriteStartNestedDocument(int documentLength = 0)
     {
-        // Before the element header, so a rejected length does not consume an array index.
+        // This test is before the element header. Thus a length that fails uses no array index.
         ValidateDocumentLength(documentLength);
 
         WriteType(BsonType.Document);
@@ -575,16 +576,16 @@ internal sealed class BsonWriter : IDisposable
     /// Writes a nested array element.
     /// </summary>
     /// <param name="documentLength">
-    /// The complete encoded length of the nested array, or 0 when it is unknown.
+    /// The full encoded length of the nested array, or 0 when it is unknown.
     /// See <see cref="WriteStartDocument(int)"/>.
     /// </param>
     public void WriteStartNestedArray(int documentLength = 0)
     {
-        // Before the element header, so a rejected length does not consume an array index.
+        // This test is before the element header. Thus a length that fails uses no array index.
         ValidateDocumentLength(documentLength);
 
         WriteType(BsonType.Array);
-        // Consumes this element's index before the nested array resets the counter.
+        // This uses the index of the element before the nested array sets the counter to zero.
         WriteNextArrayKey();
         PushArrayScope();
         BeginDocument(documentLength);
@@ -596,19 +597,20 @@ internal sealed class BsonWriter : IDisposable
     }
 
     /// <summary>
-    /// A null-terminated string with no length prefix. Element names and regex parts use this
-    /// form.
+    /// A string with a null terminator and no length prefix. An element name and each part of
+    /// a regular expression use this form.
     /// </summary>
     private void WriteCString(string value) => WriteUtf8(value, lengthPrefixed: false);
 
     /// <summary>
-    /// A length-prefixed, null-terminated string. String and JavaScript values use this form.
+    /// A string with a length prefix and a null terminator. A String value and a JavaScript
+    /// value use this form.
     /// </summary>
     private void WriteStringValue(string value) => WriteUtf8(value, lengthPrefixed: true);
 
     /// <summary>
-    /// Encodes <paramref name="value"/> as UTF-8 and writes it with its terminator, and with
-    /// its length in front when BSON calls for one.
+    /// Encodes <paramref name="value"/> as UTF-8 and writes it with its terminator. It also
+    /// writes a length in front of the value when BSON needs one.
     /// </summary>
     private void WriteUtf8(string value, bool lengthPrefixed)
     {
@@ -618,7 +620,7 @@ internal sealed class BsonWriter : IDisposable
         if (lengthPrefixed)
             WriteInt32Raw(byteCount + 1); // the declared length counts the terminator
 
-        // Names and short values dominate; only an outsized one reaches the heap.
+        // Most values are names or short strings. Only a very large value goes to the heap.
         Span<byte> buffer = byteCount <= 256
             ? stackalloc byte[byteCount]
             : new byte[byteCount];
@@ -635,13 +637,13 @@ internal sealed class BsonWriter : IDisposable
         WriteByteRaw(0);
     }
 
-    // Staging primitives. Every byte this writer emits passes through one of these and
-    // leaves through the single Flush() below, which is what keeps an alternative destination
-    // (IBufferWriter, PipeWriter) a local change rather than a rewrite.
+    // The buffer primitives. Each byte that this writer produces goes through one of these
+    // methods and then through the one Drain() below. Thus a different destination
+    // (IBufferWriter, PipeWriter) is a local change and not a new writer.
 
     /// <summary>
-    /// Reserves <paramref name="count"/> contiguous staged bytes. Scalars only; bulk payloads
-    /// go through <see cref="WriteBytesRaw"/>.
+    /// Keeps <paramref name="count"/> adjacent bytes in the buffer. Use this method only for a
+    /// scalar value. A large value goes through <see cref="WriteBytesRaw"/>.
     /// </summary>
     private Span<byte> Stage(int count)
     {
@@ -676,7 +678,7 @@ internal sealed class BsonWriter : IDisposable
     private void WriteInt64Raw(long value) =>
         BinaryPrimitives.WriteInt64LittleEndian(Stage(8), value);
 
-    // Raw bits keep this little-endian on either endianness, matching BinaryWriter.
+    // The raw bits keep this value little-endian on all machines, the same as BinaryWriter.
     private void WriteDoubleRaw(double value) =>
         WriteInt64Raw(BitConverter.DoubleToInt64Bits(value));
 
@@ -702,8 +704,8 @@ internal sealed class BsonWriter : IDisposable
             return;
         }
 
-        // Larger than the staging window: go straight to the stream rather than growing the
-        // buffer, so writer memory stays bounded.
+        // The value is longer than the buffer. Write it directly to the stream and do not make
+        // the buffer larger. Thus the writer memory has a limit.
         _position += value.Length;
 #if NET6_0_OR_GREATER
         _stream.Write(value);
@@ -719,12 +721,12 @@ internal sealed class BsonWriter : IDisposable
     }
 
     /// <summary>
-    /// Writes any staged bytes to the underlying stream and flushes the stream itself, so the
-    /// bytes reach the ultimate destination behind any wrapper holding its own buffer.
+    /// Writes the bytes in the buffer to the stream and then flushes the stream. Thus the bytes
+    /// reach the final destination behind each wrapper that has its own buffer.
     /// </summary>
     /// <remarks>
-    /// Only needed to publish a partially written document: closing a top-level document
-    /// already drains the staging buffer, and <see cref="Dispose"/> flushes.
+    /// You need this method only for an incomplete document. <see cref="WriteEndDocument"/> on
+    /// the top-level document already drains the buffer, and <see cref="Dispose"/> flushes.
     /// </remarks>
     public void Flush()
     {
@@ -734,9 +736,9 @@ internal sealed class BsonWriter : IDisposable
     }
 
     /// <summary>
-    /// Moves staged bytes to the stream without flushing it. This is the internal half of
-    /// <see cref="Flush"/>: it runs whenever the staging buffer fills, where flushing the
-    /// destination on every window would defeat any buffering the caller wrapped it in.
+    /// Moves the bytes in the buffer to the stream and does not flush it. This is the internal
+    /// part of <see cref="Flush"/>. It runs each time the buffer becomes full. A flush of the
+    /// destination each time would prevent the caller's own buffer from doing its work.
     /// </summary>
     private void Drain()
     {
@@ -766,7 +768,8 @@ internal sealed class BsonWriter : IDisposable
         {
             Drain();
 
-            // Disposing the stream flushes it, so this only matters for one the caller keeps.
+            // Dispose on the stream flushes it. Thus this call is necessary only for a stream
+            // that the caller keeps open.
             if (_leaveOpen)
                 _stream.Flush();
         }
@@ -774,8 +777,8 @@ internal sealed class BsonWriter : IDisposable
         {
             var buffer = _buffer;
             _buffer = [];
-            // Cleared: the pool hands this array to the next renter as-is, and it still holds
-            // whatever was serialized through it.
+            // Clear the array. The pool gives it to the next caller without a change, and it
+            // still holds the data that the writer wrote through it.
             ArrayPool<byte>.Shared.Return(buffer, clearArray: true);
 
             if (!_leaveOpen)
