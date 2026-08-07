@@ -3,6 +3,11 @@ using Microsoft.CodeAnalysis.Text;
 
 namespace MiniBson.Generator;
 
+// The equatable snapshot the incremental pipeline caches on. Everything here holds values
+// rather than Roslyn symbols, so a compilation that produces the same model short-circuits
+// before any code is emitted. Add a member only if an emitter reads it: an unread field
+// still takes part in equality and can only invalidate the cache for no benefit.
+
 /// <summary>
 /// Equatable stand-in for <see cref="Location"/>. Storing a real Location in the
 /// incremental model would root a SyntaxTree and defeat caching.
@@ -47,8 +52,6 @@ internal sealed record TypeRefInfo(
     SpecialType SpecialType,
     bool IsValueType,
     bool IsNullable,
-    NullableAnnotation NullableAnnotation,
-    TypeKind TypeKind,
     SpecialType? EnumUnderlyingType,
     TypeRefInfo? ArrayElementType,
     TypeRefInfo? NullableUnderlyingType,

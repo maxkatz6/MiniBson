@@ -235,6 +235,41 @@ public sealed class BsonGeneratorDiagnosticTests
     }
 
     /// <summary>
+    /// Only <c>System.Guid</c> maps to the BSON UUID subtype. A user type that merely shares
+    /// the simple name is an ordinary model, and claiming it emitted a <c>WriteGuid</c> call
+    /// that does not compile.
+    /// </summary>
+    [TestMethod]
+    public void UserTypeNamedGuidIsTreatedAsANestedModel()
+    {
+        var errors = CompileGenerated(
+            """
+            using MiniBson;
+
+            namespace App
+            {
+                public class Guid
+                {
+                    public int Value { get; set; }
+                }
+
+                public class Model
+                {
+                    public Guid Custom { get; set; } = new();
+                }
+
+                [BsonSerializable(typeof(Model))]
+                public partial class Context;
+            }
+            """)
+            .Where(d => d.Severity == DiagnosticSeverity.Error)
+            .ToArray();
+
+        Assert.AreEqual(0, errors.Length,
+            "Generated code should compile, got: " + string.Join("; ", errors.Select(e => e.ToString())));
+    }
+
+    /// <summary>
     /// Two models can legally share a simple name. Generated helpers all land in one partial
     /// class, so naming them after the simple name emits the same member twice — a CS0111 in
     /// a file the user cannot edit and did not write.

@@ -557,7 +557,12 @@ internal sealed class BsonReader : IDisposable
         }
 
         if (_stream is null)
+        {
+            // Nothing can refill a buffer-backed reader, so an absent terminator is the end of
+            // the input — unless the window is empty because this reader was disposed.
+            ThrowIfDisposed();
             throw new InvalidDataException("Unterminated cstring.");
+        }
 
         return ReadCStringAcrossRefills();
     }
@@ -696,6 +701,7 @@ internal sealed class BsonReader : IDisposable
     /// </summary>
     private void ReadExact(byte[] destination, int offset, int count)
     {
+        ThrowIfDisposed();
         EnsureWithinDocument(count);
 
         var buffered = Math.Min(count, _end - _start);
@@ -744,8 +750,21 @@ internal sealed class BsonReader : IDisposable
             FillAtLeast(count);
     }
 
+    /// <summary>
+    /// Rejects use after disposal. Placed on the three methods every read eventually reaches
+    /// rather than on each public method: disposal empties the window, so anything that still
+    /// has bytes to produce has to refill, copy, or skip to get them. Costs one check per
+    /// logical read instead of one per primitive.
+    /// </summary>
+    private void ThrowIfDisposed()
+    {
+        if (_disposed)
+            throw new ObjectDisposedException(nameof(BsonReader));
+    }
+
     private void FillAtLeast(int minimum)
     {
+        ThrowIfDisposed();
         EnsureWithinDocument(minimum);
 
         if (_stream is null)
@@ -813,6 +832,8 @@ internal sealed class BsonReader : IDisposable
     {
         if (count == 0)
             return;
+
+        ThrowIfDisposed();
 
         if (count < 0)
         {

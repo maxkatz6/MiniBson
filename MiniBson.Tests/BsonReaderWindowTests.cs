@@ -241,4 +241,52 @@ public sealed class BsonReaderWindowTests
         Assert.IsFalse(reader.Read());
         reader.ReadEndDocument();
     }
+
+    /// <summary>
+    /// Disposal returns the window to the pool. Reading on afterwards would otherwise read
+    /// whatever the next renter of that array put in it, or fail as an index error that says
+    /// nothing about the actual mistake.
+    /// </summary>
+    [TestMethod]
+    public void ReadingAfterDisposeThrowsObjectDisposed()
+    {
+        var document = Write(w =>
+        {
+            w.WriteInt32("n", 1);
+            w.WriteString("s", "value");
+        });
+
+        var reader = new BsonReader(new MemoryStream(document, writable: false));
+        reader.ReadStartDocument();
+        Assert.IsTrue(reader.Read());
+        reader.Dispose();
+
+        Assert.Throws<ObjectDisposedException>(() => reader.Read());
+    }
+
+    [TestMethod]
+    public void SkippingAfterDisposeThrowsObjectDisposed()
+    {
+        var document = Write(w => w.WriteString("s", new string('x', 64)));
+
+        var reader = new BsonReader(new MemoryStream(document, writable: false));
+        reader.ReadStartDocument();
+        Assert.IsTrue(reader.Read());
+        reader.Dispose();
+
+        Assert.Throws<ObjectDisposedException>(() => reader.Skip());
+    }
+
+    /// <summary>A buffer-backed reader rents no window, but is just as unusable afterwards.</summary>
+    [TestMethod]
+    public void ReadingAfterDisposeThrowsForABufferBackedReader()
+    {
+        var document = Write(w => w.WriteInt32("n", 1));
+
+        var reader = new BsonReader(document);
+        reader.ReadStartDocument();
+        reader.Dispose();
+
+        Assert.Throws<ObjectDisposedException>(() => reader.Read());
+    }
 }

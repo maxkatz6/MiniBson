@@ -98,7 +98,6 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
 
     public void Initialize(IncrementalGeneratorInitializationContext context)
     {
-        // Find all classes with [BsonSerializable] attribute
         var classDeclarations = context.SyntaxProvider
             .ForAttributeWithMetadataName(
                 BsonSerializableAttributeFullName,
@@ -119,11 +118,11 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
 
         var classDeclaration = (ClassDeclarationSyntax)context.TargetNode;
 
-        // Check if the class is partial
+        // Nothing to generate into. The user sees this as CS1061 on their Serialize call
+        // rather than as a diagnostic pointing here.
         if (!classDeclaration.Modifiers.Any(SyntaxKind.PartialKeyword))
             return null;
 
-        // Collect all types from [BsonSerializable(typeof(...))] attributes
         var serializableTypes = new List<TypeInfo>();
 
         foreach (var attribute in classSymbol.GetAttributes())
@@ -149,24 +148,14 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
             LocationInfo.From(classDeclaration.Identifier.GetLocation()));
     }
 
-    private static string GetAccessibility(ClassDeclarationSyntax classDeclaration)
-    {
-        foreach (var modifier in classDeclaration.Modifiers)
-        {
-            switch (modifier.Kind())
-            {
-                case SyntaxKind.PublicKeyword:
-                    return "public";
-                case SyntaxKind.InternalKeyword:
-                    return "internal";
-                case SyntaxKind.PrivateKeyword:
-                    return "private";
-                case SyntaxKind.ProtectedKeyword:
-                    return "protected";
-            }
-        }
-        return "internal";
-    }
+    /// <summary>
+    /// Accessibility to emit the context partial with. Only <c>public</c> and <c>internal</c>
+    /// are legal at namespace scope, which is where this generator emits, so everything else
+    /// falls back to <c>internal</c>. A context nested in another type is not supported: the
+    /// generated half would still be emitted at namespace scope.
+    /// </summary>
+    private static string GetAccessibility(ClassDeclarationSyntax classDeclaration) =>
+        classDeclaration.Modifiers.Any(SyntaxKind.PublicKeyword) ? "public" : "internal";
 
     private static void GenerateCode(
         SourceProductionContext context,
@@ -262,7 +251,6 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
 
         allTypes[type.FullyQualifiedName] = type;
 
-        // Collect types from properties
         foreach (var property in type.Properties)
         {
             CollectAllTypesFromRef(property.Type, allTypes);
@@ -419,7 +407,10 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
                 return new ValueMapping(BsonMapping.DateTime);
         }
 
-        if (type.FullyQualifiedName == "global::System.Guid" || type.Name == "Guid")
+        // Matched on the fully qualified name alone. Matching the simple name too would claim
+        // any user type called Guid, which reaches here before the Nested case below and emits
+        // a WriteGuid call that does not compile.
+        if (type.FullyQualifiedName == "global::System.Guid")
             return new ValueMapping(BsonMapping.Guid);
 
         if (type.NestedTypeInfo is { } nestedType)
@@ -871,12 +862,10 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         sb.AppendLine("    }");
         sb.AppendLine();
 
-        // Generate inner read method (without ReadStartDocument/ReadEndDocument)
         sb.AppendLine($"    private {typeName} Read{methodName}Inner(BsonReader reader)");
         sb.AppendLine("    {");
         sb.AppendLine("#nullable disable");
 
-        // Declare variables for all properties including inherited
         foreach (var property in type.Properties)
         {
             var propertyType = property.Type.FullyQualifiedName;
@@ -905,30 +894,30 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         sb.AppendLine("        }");
         sb.AppendLine();
 
-        // Create and return the object
-        var properties = type.Properties.ToList();
-
-        // Check if type is a record
-        var isRecord = type.IsRecord;
-
-        if (isRecord)
+        // Both forms below are a comma-separated list of the locals accumulated above, one
+        // per line, differing only in how each line names its target.
+        void AppendPropertyList(Func<PropertyInfo, string> line)
         {
-            // Use constructor for records
-            sb.AppendLine($"        return new {typeName}(");
             var first = true;
-            foreach (var property in properties)
+            foreach (var property in type.Properties)
             {
                 if (!first)
                     sb.AppendLine(",");
-                else
-                    first = false;
 
-                sb.Append($"            _{property.Name}");
+                first = false;
+                sb.Append($"            {line(property)}");
             }
+
             sb.AppendLine();
+        }
+
+        if (type.IsRecord)
+        {
+            sb.AppendLine($"        return new {typeName}(");
+            AppendPropertyList(p => $"_{p.Name}");
             sb.AppendLine("        );");
         }
-        else if (properties.FirstOrDefault(p => !p.IsSettable) is { } readOnlyProperty)
+        else if (type.Properties.FirstOrDefault(p => !p.IsSettable) is { } readOnlyProperty)
         {
             // An object initializer can't assign this, and emitting one anyway buries the
             // user in CS0200s pointing at generated code. Report it as MINIBSON001 instead.
@@ -941,22 +930,9 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         }
         else
         {
-            // Use object initializer for classes
             sb.AppendLine($"        return new {typeName}");
             sb.AppendLine("        {");
-
-            var first = true;
-            foreach (var property in properties)
-            {
-                if (!first)
-                    sb.AppendLine(",");
-                else
-                    first = false;
-
-                sb.Append($"            {property.Name} = _{property.Name}");
-            }
-
-            sb.AppendLine();
+            AppendPropertyList(p => $"{p.Name} = _{p.Name}");
             sb.AppendLine("        };");
         }
         sb.AppendLine("#nullable restore");
@@ -1214,37 +1190,30 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         sb.AppendLine($"{indent}throw new NotSupportedException($\"Type {{{selector}}} is not supported for {operation}.\");");
     }
 
+    /// <summary>
+    /// Public readable instance properties of a type and its bases, most derived first.
+    /// </summary>
+    /// <remarks>
+    /// The order is load-bearing: it is the order elements are emitted in, so reversing it
+    /// changes the bytes on the wire for every model with a base class. The first declaration
+    /// of a name wins, which is what makes a <c>new</c> property shadow the one it hides.
+    /// </remarks>
     private static IEnumerable<IPropertySymbol> GetAllProperties(INamedTypeSymbol type)
     {
-        // Collect types from derived to base
-        var typeHierarchy = new List<INamedTypeSymbol>();
-        var currentType = type;
-
-        while (currentType != null && currentType.SpecialType != SpecialType.System_Object)
-        {
-            typeHierarchy.Add(currentType);
-            currentType = currentType.BaseType;
-        }
-
-        // Process in derived-to-base order (no reversal)
-        // This means properties from the most derived class come first
         var properties = new List<IPropertySymbol>();
         var seenPropertyNames = new HashSet<string>();
 
-        foreach (var typeInHierarchy in typeHierarchy)
+        for (var current = type;
+             current != null && current.SpecialType != SpecialType.System_Object;
+             current = current.BaseType)
         {
-            foreach (var member in typeInHierarchy.GetMembers())
+            foreach (var member in current.GetMembers())
             {
-                if (member is IPropertySymbol property &&
-                    property.DeclaredAccessibility == Accessibility.Public &&
-                    !property.IsStatic &&
-                    property.GetMethod != null)
+                if (member is IPropertySymbol { IsStatic: false, DeclaredAccessibility: Accessibility.Public } property &&
+                    property.GetMethod != null &&
+                    seenPropertyNames.Add(property.Name))
                 {
-                    // Only add if not already added (handles property hiding/new)
-                    if (seenPropertyNames.Add(property.Name))
-                    {
-                        properties.Add(property);
-                    }
+                    properties.Add(property);
                 }
             }
         }
@@ -1297,14 +1266,20 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
 
     private static TypeRefInfo ExtractTypeRefInfo(ITypeSymbol symbol, HashSet<INamedTypeSymbol> visited)
     {
-        var isNullableValueType = symbol is INamedTypeSymbol { IsGenericType: true } nt &&
-                                  nt.OriginalDefinition.SpecialType == SpecialType.System_Nullable_T;
-        var isNullable = isNullableValueType || symbol.NullableAnnotation == NullableAnnotation.Annotated;
+        var nullableValueType = symbol as INamedTypeSymbol;
+        if (nullableValueType is not { IsGenericType: true } ||
+            nullableValueType.OriginalDefinition.SpecialType != SpecialType.System_Nullable_T)
+        {
+            nullableValueType = null;
+        }
+
+        var isNullable = nullableValueType is not null ||
+                         symbol.NullableAnnotation == NullableAnnotation.Annotated;
 
         TypeRefInfo? nullableUnderlying = null;
-        if (isNullableValueType && symbol is INamedTypeSymbol nvt)
+        if (nullableValueType is not null)
         {
-            nullableUnderlying = ExtractTypeRefInfo(nvt.TypeArguments[0], visited);
+            nullableUnderlying = ExtractTypeRefInfo(nullableValueType.TypeArguments[0], visited);
         }
 
         TypeRefInfo? arrayElement = null;
@@ -1314,31 +1289,30 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         }
 
         SpecialType? enumUnderlying = null;
-        if (symbol.TypeKind == TypeKind.Enum && symbol is INamedTypeSymbol enumType)
+        if (symbol is INamedTypeSymbol { TypeKind: TypeKind.Enum } enumType)
         {
             enumUnderlying = enumType.EnumUnderlyingType?.SpecialType;
         }
 
+        // An array symbol is never an INamedTypeSymbol, so arrays fall out here without a
+        // test of their own.
         TypeInfo? nestedTypeInfo = null;
         if (symbol is INamedTypeSymbol namedType &&
             !IsPrimitiveType(symbol) &&
             // decimal has no BSON mapping here; treating it as a POCO would silently
             // emit an empty document, so let it fall through to MINIBSON001 instead.
             symbol.SpecialType != SpecialType.System_Decimal &&
-            symbol is not IArrayTypeSymbol &&
-            !isNullableValueType)
+            nullableValueType is null)
         {
             nestedTypeInfo = ExtractTypeInfo(namedType, visited);
         }
 
         return new TypeRefInfo(
             symbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
-            symbol is INamedTypeSymbol ns ? ns.Name : symbol.Name,
+            symbol.Name,
             symbol.SpecialType,
             symbol.IsValueType,
             isNullable,
-            symbol.NullableAnnotation,
-            symbol.TypeKind,
             enumUnderlying,
             arrayElement,
             nullableUnderlying,
