@@ -128,7 +128,8 @@ internal sealed class BsonReader : IDisposable
 
         var context = _contextStack.Pop();
 
-        // Skip to end position if not already there (handles skipped fields)
+        // Forward to the terminator, over any element the caller chose not to read. Stopping
+        // one byte short of the end leaves it to be checked below.
         Advance(context.EndPosition - 1 - _position);
 
         var endMarker = ReadByteCore();
@@ -139,6 +140,13 @@ internal sealed class BsonReader : IDisposable
         if (_contextStack.Count == 0)
             _readLimit = -1;
     }
+
+    /// <summary>
+    /// Reads the end of an array. An array is a document on the wire, so this is
+    /// <see cref="ReadEndDocument"/> under the name that pairs with
+    /// <see cref="ReadStartArray"/> — and with <c>BsonWriter.WriteEndArray</c>.
+    /// </summary>
+    public void ReadEndArray() => ReadEndDocument();
 
     /// <summary>
     /// Reads a document's length prefix and opens a context for it.
@@ -202,50 +210,43 @@ internal sealed class BsonReader : IDisposable
         return ReadByteCore() != 0;
     }
 
+    // The numeric readers accept any of the three numeric wire types and convert, so a model
+    // whose property widened or narrowed still reads documents written before the change. The
+    // switch is the whole type check; a separate EnsureType ahead of it would only repeat the
+    // set it already lists.
+
     /// <summary>
     /// Reads a 32-bit integer value.
     /// </summary>
-    public int ReadInt32()
+    public int ReadInt32() => CurrentType switch
     {
-        EnsureType(BsonType.Int32, BsonType.Int64, BsonType.Double);
-        return CurrentType switch
-        {
-            BsonType.Int32 => ReadInt32Core(),
-            BsonType.Int64 => (int)ReadInt64Core(),
-            BsonType.Double => (int)ReadDoubleCore(),
-            _ => throw new InvalidOperationException()
-        };
-    }
+        BsonType.Int32 => ReadInt32Core(),
+        BsonType.Int64 => (int)ReadInt64Core(),
+        BsonType.Double => (int)ReadDoubleCore(),
+        _ => throw UnexpectedType(BsonType.Int32, BsonType.Int64, BsonType.Double)
+    };
 
     /// <summary>
     /// Reads a 64-bit integer value.
     /// </summary>
-    public long ReadInt64()
+    public long ReadInt64() => CurrentType switch
     {
-        EnsureType(BsonType.Int64, BsonType.Int32, BsonType.Double);
-        return CurrentType switch
-        {
-            BsonType.Int64 => ReadInt64Core(),
-            BsonType.Int32 => ReadInt32Core(),
-            BsonType.Double => (long)ReadDoubleCore(),
-            _ => throw new InvalidOperationException()
-        };
-    }
+        BsonType.Int64 => ReadInt64Core(),
+        BsonType.Int32 => ReadInt32Core(),
+        BsonType.Double => (long)ReadDoubleCore(),
+        _ => throw UnexpectedType(BsonType.Int64, BsonType.Int32, BsonType.Double)
+    };
 
     /// <summary>
     /// Reads a double value.
     /// </summary>
-    public double ReadDouble()
+    public double ReadDouble() => CurrentType switch
     {
-        EnsureType(BsonType.Double, BsonType.Int32, BsonType.Int64);
-        return CurrentType switch
-        {
-            BsonType.Double => ReadDoubleCore(),
-            BsonType.Int32 => ReadInt32Core(),
-            BsonType.Int64 => ReadInt64Core(),
-            _ => throw new InvalidOperationException()
-        };
-    }
+        BsonType.Double => ReadDoubleCore(),
+        BsonType.Int32 => ReadInt32Core(),
+        BsonType.Int64 => ReadInt64Core(),
+        _ => throw UnexpectedType(BsonType.Double, BsonType.Int32, BsonType.Int64)
+    };
 
     /// <summary>
     /// Reads a string value.
@@ -292,18 +293,28 @@ internal sealed class BsonReader : IDisposable
     /// </summary>
     public (byte[] Data, BsonBinarySubType SubType) ReadBinary()
     {
+        var subType = ReadBinaryHeader(out var dataLength);
+        return (ReadBytesCore(dataLength), subType);
+    }
+
+    /// <summary>
+    /// Consumes a binary value's length prefix and subtype byte, leaving the reader on the
+    /// payload.
+    /// </summary>
+    /// <param name="dataLength">
+    /// Payload length. The deprecated <see cref="BsonBinarySubType.BinaryOld"/> repeats the
+    /// length inside the payload, and it is the inner one that describes the bytes.
+    /// </param>
+    private BsonBinarySubType ReadBinaryHeader(out int dataLength)
+    {
         EnsureType(BsonType.Binary);
-        var length = ReadLengthCore(0, "A binary value");
+        dataLength = ReadLengthCore(0, "A binary value");
         var subType = (BsonBinarySubType)ReadByteCore();
 
-        // Handle old binary subtype that has an extra length prefix
         if (subType == BsonBinarySubType.BinaryOld)
-        {
-            var innerLength = ReadLengthCore(0, "A binary value");
-            return (ReadBytesCore(innerLength), subType);
-        }
+            dataLength = ReadLengthCore(0, "A binary value");
 
-        return (ReadBytesCore(length), subType);
+        return subType;
     }
 
     /// <summary>
@@ -315,15 +326,7 @@ internal sealed class BsonReader : IDisposable
     /// </summary>
     public (ReadOnlyMemory<byte> Data, BsonBinarySubType SubType) ReadBinaryAsMemory()
     {
-        EnsureType(BsonType.Binary);
-        var length = ReadLengthCore(0, "A binary value");
-        var subType = (BsonBinarySubType)ReadByteCore();
-
-        var dataLength = length;
-        if (subType == BsonBinarySubType.BinaryOld)
-        {
-            dataLength = ReadLengthCore(0, "A binary value");
-        }
+        var subType = ReadBinaryHeader(out var dataLength);
 
         if (_bufferIsSource)
         {
@@ -429,6 +432,12 @@ internal sealed class BsonReader : IDisposable
     /// <summary>
     /// Skips the current element value.
     /// </summary>
+    /// <remarks>
+    /// Covers every type <see cref="BsonType"/> names, including the deprecated ones this
+    /// reader has no accessor for. Generated deserializers skip every field they do not
+    /// recognise, so a gap here is a document that cannot be read at all rather than one
+    /// field that cannot be.
+    /// </remarks>
     public void Skip()
     {
         switch (CurrentType)
@@ -470,6 +479,11 @@ internal sealed class BsonReader : IDisposable
                 ReadCString(); // pattern
                 ReadCString(); // options
                 break;
+            case BsonType.DBPointer:
+                // Deprecated: a string, then a 12-byte ObjectId.
+                var pointerLength = ReadLengthCore(1, "A string");
+                Advance(pointerLength + BsonSize.ObjectId);
+                break;
             case BsonType.Int32:
                 Advance(4);
                 break;
@@ -481,7 +495,10 @@ internal sealed class BsonReader : IDisposable
                 Advance(16);
                 break;
             default:
-                throw new InvalidDataException($"Unknown BSON type: {CurrentType}");
+                // Not a type byte this reader knows, so its length is unknowable and the
+                // rest of the document would be parsed against the wrong offsets.
+                throw new InvalidDataException(
+                    $"Cannot skip BSON type 0x{(byte)CurrentType:X2}: it is not a known type, so its length is undefined.");
         }
     }
 
@@ -621,20 +638,23 @@ internal sealed class BsonReader : IDisposable
     private void EnsureType(BsonType expected)
     {
         if (CurrentType != expected)
-            throw new InvalidOperationException($"Expected {expected}, but current type is {CurrentType}.");
+            throw UnexpectedType(expected);
     }
 
-    private void EnsureType(BsonType expected1, BsonType expected2)
+    private void EnsureType(BsonType first, BsonType second, BsonType third)
     {
-        if (CurrentType != expected1 && CurrentType != expected2)
-            throw new InvalidOperationException($"Expected one of [{expected1}, {expected2}], but current type is {CurrentType}.");
+        if (CurrentType != first && CurrentType != second && CurrentType != third)
+            throw UnexpectedType(first, second, third);
     }
 
-    private void EnsureType(BsonType expected1, BsonType expected2, BsonType expected3)
-    {
-        if (CurrentType != expected1 && CurrentType != expected2 && CurrentType != expected3)
-            throw new InvalidOperationException($"Expected one of [{expected1}, {expected2}, {expected3}], but current type is {CurrentType}.");
-    }
+    /// <summary>
+    /// The one place a type mismatch is worded. Takes <see langword="params"/>, which allocates
+    /// — on the throwing path only, where the exception costs more than the array.
+    /// </summary>
+    private InvalidOperationException UnexpectedType(params BsonType[] expected) =>
+        new(expected.Length == 1
+            ? $"Expected {expected[0]}, but current type is {CurrentType}."
+            : $"Expected one of [{string.Join(", ", expected)}], but current type is {CurrentType}.");
 
     private static readonly DateTime UnixEpoch = new(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
 

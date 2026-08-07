@@ -234,7 +234,7 @@ reader.ReadEndDocument();
 | Double | `WriteDouble` | `ReadDouble` |
 | String | `WriteString` | `ReadString` |
 | Document | `WriteStartDocument`, `WriteEndDocument` | `ReadStartDocument`, `ReadStartNestedDocument`, `ReadEndDocument` |
-| Array | `WriteStartArray`, `WriteEndArray` | `ReadStartArray`, `ReadEndDocument` |
+| Array | `WriteStartArray`, `WriteEndArray` | `ReadStartArray`, `ReadEndArray` |
 | Binary | `WriteBinary` | `ReadBinary`, `ReadBinaryAsMemory` |
 | ObjectId | `WriteObjectId` | `ReadObjectId` |
 | Boolean | `WriteBoolean` | `ReadBoolean` |
@@ -246,6 +246,10 @@ reader.ReadEndDocument();
 | Timestamp | `WriteTimestamp` | `ReadTimestamp` |
 | Int64 | `WriteInt64` | `ReadInt64` |
 | UUID | `WriteGuid` | `ReadGuid` |
+
+An array is a document on the wire, so `ReadEndArray` and `ReadEndDocument` are the same call under two names; use whichever mirrors the write side.
+
+`Skip()` additionally covers every deprecated type in the specification — `Undefined`, `DBPointer`, `Symbol`, `JavaScriptWithScope`, `Decimal128`, `MinKey`, and `MaxKey` — even where there is no accessor for the value. Generated deserializers skip every field they do not recognise, so a document containing one of these stays readable.
 
 Readers constructed from `byte[]` or `ReadOnlyMemory<byte>` use the supplied buffer directly. On that path, `ReadBinaryAsMemory()` returns a zero-copy slice that aliases the input; use `ReadBinary()` when an independent copy is needed.
 

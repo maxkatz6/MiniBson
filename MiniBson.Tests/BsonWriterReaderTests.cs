@@ -79,10 +79,47 @@ public sealed class BsonWriterReaderTests
         Assert.AreEqual(3, reader.ReadInt32());
 
         Assert.IsFalse(reader.Read());
-        reader.ReadEndDocument(); // End array
+        reader.ReadEndArray();
 
         Assert.IsFalse(reader.Read());
-        reader.ReadEndDocument(); // End root document
+        reader.ReadEndDocument();
+    }
+
+    /// <summary>
+    /// An array is a document on the wire, so the two closers are interchangeable. The pair
+    /// exists so reading code can mirror the writing code that produced the bytes.
+    /// </summary>
+    [TestMethod]
+    public void ReadEndArrayAndReadEndDocumentAreInterchangeable()
+    {
+        using var ms = new MemoryStream();
+        using (var writer = new BsonWriter(ms, leaveOpen: true))
+        {
+            writer.WriteStartDocument();
+            writer.WriteStartArray("items");
+            writer.WriteInt32(1);
+            writer.WriteEndArray();
+            writer.WriteEndDocument();
+        }
+
+        static int ReadWith(byte[] document, Action<BsonReader> endArray)
+        {
+            using var reader = new BsonReader(document);
+            reader.ReadStartDocument();
+            Assert.IsTrue(reader.Read());
+            reader.ReadStartArray();
+            Assert.IsTrue(reader.Read());
+            var value = reader.ReadInt32();
+            Assert.IsFalse(reader.Read());
+            endArray(reader);
+            Assert.IsFalse(reader.Read());
+            reader.ReadEndDocument();
+            return value;
+        }
+
+        var document = ms.ToArray();
+        Assert.AreEqual(1, ReadWith(document, r => r.ReadEndArray()));
+        Assert.AreEqual(1, ReadWith(document, r => r.ReadEndDocument()));
     }
 
     [TestMethod]

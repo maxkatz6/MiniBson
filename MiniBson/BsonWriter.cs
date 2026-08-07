@@ -95,7 +95,17 @@ internal sealed class BsonWriter : IDisposable
     public void WriteStartDocument(int documentLength)
     {
         ValidateDocumentLength(documentLength);
+        BeginDocument(documentLength);
+    }
 
+    /// <summary>
+    /// Opens a document whose length has already been validated. The named and positional
+    /// forms below validate before emitting their element header, so that a rejected length
+    /// leaves nothing behind; going back through <see cref="WriteStartDocument(int)"/> would
+    /// only check it a second time.
+    /// </summary>
+    private void BeginDocument(int documentLength)
+    {
         _openDocuments.Push(new DocumentFrame
         {
             StartPosition = _position,
@@ -213,9 +223,18 @@ internal sealed class BsonWriter : IDisposable
 
         WriteType(BsonType.Array);
         WriteCString(name);
+        PushArrayScope();
+        BeginDocument(documentLength);
+    }
+
+    /// <summary>
+    /// Starts numbering a new array's elements from zero, keeping the enclosing array's
+    /// counter for <see cref="WriteEndArray"/> to restore.
+    /// </summary>
+    private void PushArrayScope()
+    {
         _arrayIndexStack.Push(_arrayIndex);
         _arrayIndex = 0;
-        WriteStartDocument(documentLength);
     }
 
     /// <summary>
@@ -250,7 +269,7 @@ internal sealed class BsonWriter : IDisposable
 
         WriteType(BsonType.Document);
         WriteCString(name);
-        WriteStartDocument(documentLength);
+        BeginDocument(documentLength);
     }
 
     /// <summary>
@@ -376,12 +395,17 @@ internal sealed class BsonWriter : IDisposable
     public void WriteGuid(string name, Guid value)
     {
         Span<byte> bytes = stackalloc byte[16];
-#if NET6_0_OR_GREATER
-        value.TryWriteBytes(bytes);
-#else
-        value.ToByteArray().CopyTo(bytes);
-#endif
+        WriteGuidBytes(value, bytes);
         WriteBinary(name, bytes, BsonBinarySubType.Uuid);
+    }
+
+    private static void WriteGuidBytes(Guid value, Span<byte> destination)
+    {
+#if NET6_0_OR_GREATER
+        value.TryWriteBytes(destination);
+#else
+        value.ToByteArray().CopyTo(destination);
+#endif
     }
 
     /// <summary>
@@ -526,11 +550,7 @@ internal sealed class BsonWriter : IDisposable
     public void WriteGuid(Guid value)
     {
         Span<byte> bytes = stackalloc byte[16];
-#if NET6_0_OR_GREATER
-        value.TryWriteBytes(bytes);
-#else
-        value.ToByteArray().CopyTo(bytes);
-#endif
+        WriteGuidBytes(value, bytes);
         WriteBinary(bytes, BsonBinarySubType.Uuid);
     }
 
@@ -548,7 +568,7 @@ internal sealed class BsonWriter : IDisposable
 
         WriteType(BsonType.Document);
         WriteNextArrayKey();
-        WriteStartDocument(documentLength);
+        BeginDocument(documentLength);
     }
 
     /// <summary>
@@ -566,9 +586,8 @@ internal sealed class BsonWriter : IDisposable
         WriteType(BsonType.Array);
         // Consumes this element's index before the nested array resets the counter.
         WriteNextArrayKey();
-        _arrayIndexStack.Push(_arrayIndex);
-        _arrayIndex = 0;
-        WriteStartDocument(documentLength);
+        PushArrayScope();
+        BeginDocument(documentLength);
     }
 
     private void WriteType(BsonType type)
@@ -576,27 +595,30 @@ internal sealed class BsonWriter : IDisposable
         WriteByteRaw((byte)type);
     }
 
-    private void WriteCString(string value)
-    {
-#if NET6_0_OR_GREATER
-        var byteCount = Encoding.UTF8.GetByteCount(value);
-        Span<byte> buffer = byteCount <= 256
-            ? stackalloc byte[byteCount]
-            : new byte[byteCount];
-        var written = Encoding.UTF8.GetBytes(value, buffer);
-        WriteBytesRaw(buffer.Slice(0, written));
-#else
-        var bytes = Encoding.UTF8.GetBytes(value);
-        WriteBytesRaw(bytes);
-#endif
-        WriteByteRaw(0);
-    }
+    /// <summary>
+    /// A null-terminated string with no length prefix. Element names and regex parts use this
+    /// form.
+    /// </summary>
+    private void WriteCString(string value) => WriteUtf8(value, lengthPrefixed: false);
 
-    private void WriteStringValue(string value)
+    /// <summary>
+    /// A length-prefixed, null-terminated string. String and JavaScript values use this form.
+    /// </summary>
+    private void WriteStringValue(string value) => WriteUtf8(value, lengthPrefixed: true);
+
+    /// <summary>
+    /// Encodes <paramref name="value"/> as UTF-8 and writes it with its terminator, and with
+    /// its length in front when BSON calls for one.
+    /// </summary>
+    private void WriteUtf8(string value, bool lengthPrefixed)
     {
 #if NET6_0_OR_GREATER
         var byteCount = Encoding.UTF8.GetByteCount(value);
-        WriteInt32Raw(byteCount + 1); // length includes null terminator
+
+        if (lengthPrefixed)
+            WriteInt32Raw(byteCount + 1); // the declared length counts the terminator
+
+        // Names and short values dominate; only an outsized one reaches the heap.
         Span<byte> buffer = byteCount <= 256
             ? stackalloc byte[byteCount]
             : new byte[byteCount];
@@ -604,7 +626,10 @@ internal sealed class BsonWriter : IDisposable
         WriteBytesRaw(buffer.Slice(0, written));
 #else
         var bytes = Encoding.UTF8.GetBytes(value);
-        WriteInt32Raw(bytes.Length + 1); // length includes null terminator
+
+        if (lengthPrefixed)
+            WriteInt32Raw(bytes.Length + 1); // the declared length counts the terminator
+
         WriteBytesRaw(bytes);
 #endif
         WriteByteRaw(0);

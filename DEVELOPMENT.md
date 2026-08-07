@@ -112,7 +112,11 @@ The window is the caller's *slice*, not the array behind it. A `ReadOnlyMemory<b
 
 ### Numeric conversions
 
-`ReadInt32`, `ReadInt64`, and `ReadDouble` accept all three BSON numeric representations and convert between them. This leniency is intentional: other BSON implementations may choose a different width for the same logical number.
+`ReadInt32`, `ReadInt64`, and `ReadDouble` accept all three BSON numeric representations and convert between them. This leniency is intentional: other BSON implementations may choose a different width for the same logical number. Each is a single switch over the accepted set, with the mismatch message in its default arm — a separate type check in front would restate the set the switch already lists, and the two could then disagree.
+
+### Skipping
+
+`Skip()` covers every type `BsonType` names, including the deprecated ones no accessor reads. That total coverage is the point: generated deserializers skip every field they do not recognise, so a type missing here is not one unreadable field but a document that cannot be read past that point. Adding a member to `BsonType` means adding a case, and the default arm rejects a byte that names no type at all, whose length is unknowable.
 
 ### Encoding details
 
