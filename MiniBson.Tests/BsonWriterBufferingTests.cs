@@ -1,4 +1,4 @@
-﻿using MiniBson;
+using MiniBson;
 
 namespace MiniBson.Tests;
 

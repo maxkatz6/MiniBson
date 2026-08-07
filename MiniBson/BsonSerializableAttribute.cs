@@ -27,4 +27,3 @@ internal sealed class BsonSerializableAttribute : Attribute
         Type = type;
     }
 }
-

@@ -1,4 +1,4 @@
-﻿# MiniBson
+# MiniBson
 
 MiniBson is a small BSON library for .NET. It combines a forward-only reader and writer with source-generated serialization, without using runtime reflection. The runtime library is designed for trimming and Native AOT.
 

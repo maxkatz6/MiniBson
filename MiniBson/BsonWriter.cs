@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Generic;
@@ -336,7 +336,7 @@ internal sealed class BsonWriter : IDisposable
     {
         if (value.Length != 12)
             throw new ArgumentException("ObjectId must be exactly 12 bytes.", nameof(value));
-        
+
         WriteType(BsonType.ObjectId);
         WriteCString(name);
         WriteBytesRaw(value);
@@ -758,5 +758,3 @@ internal sealed class BsonWriter : IDisposable
         }
     }
 }
-
-

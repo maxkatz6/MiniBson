@@ -5,4 +5,3 @@
     <DefineConstants Condition="'$(MiniBsonPublic)' == 'true'">$(DefineConstants);MINIBSON_PUBLIC</DefineConstants>
   </PropertyGroup>
 </Project>
-

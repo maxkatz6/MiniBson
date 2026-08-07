@@ -1,4 +1,4 @@
-﻿# Developing MiniBson
+# Developing MiniBson
 
 This document covers the repository itself. For installation and usage, see [README.md](README.md).
 

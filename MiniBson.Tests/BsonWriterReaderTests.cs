@@ -24,7 +24,7 @@ public sealed class BsonWriterReaderTests
         ms.Position = 0;
         using var reader = new BsonReader(ms);
         reader.ReadStartDocument();
-        
+
         Assert.IsTrue(reader.Read());
         Assert.AreEqual("name", reader.CurrentName);
         Assert.AreEqual(BsonType.String, reader.CurrentType);
@@ -62,25 +62,25 @@ public sealed class BsonWriterReaderTests
         ms.Position = 0;
         using var reader = new BsonReader(ms);
         reader.ReadStartDocument();
-        
+
         Assert.IsTrue(reader.Read());
         Assert.AreEqual("items", reader.CurrentName);
         Assert.AreEqual(BsonType.Array, reader.CurrentType);
-        
+
         reader.ReadStartArray();
-        
+
         Assert.IsTrue(reader.Read());
         Assert.AreEqual(1, reader.ReadInt32());
-        
+
         Assert.IsTrue(reader.Read());
         Assert.AreEqual(2, reader.ReadInt32());
-        
+
         Assert.IsTrue(reader.Read());
         Assert.AreEqual(3, reader.ReadInt32());
-        
+
         Assert.IsFalse(reader.Read());
         reader.ReadEndDocument(); // End array
-        
+
         Assert.IsFalse(reader.Read());
         reader.ReadEndDocument(); // End root document
     }
@@ -101,20 +101,20 @@ public sealed class BsonWriterReaderTests
         ms.Position = 0;
         using var reader = new BsonReader(ms);
         reader.ReadStartDocument();
-        
+
         Assert.IsTrue(reader.Read());
         Assert.AreEqual("nested", reader.CurrentName);
         Assert.AreEqual(BsonType.Document, reader.CurrentType);
-        
+
         reader.ReadStartNestedDocument();
-        
+
         Assert.IsTrue(reader.Read());
         Assert.AreEqual("inner", reader.CurrentName);
         Assert.AreEqual("value", reader.ReadString());
-        
+
         Assert.IsFalse(reader.Read());
         reader.ReadEndDocument();
-        
+
         Assert.IsFalse(reader.Read());
         reader.ReadEndDocument();
     }
@@ -145,35 +145,35 @@ public sealed class BsonWriterReaderTests
         ms.Position = 0;
         using var reader = new BsonReader(ms);
         reader.ReadStartDocument();
-        
+
         Assert.IsTrue(reader.Read());
         Assert.AreEqual("hello", reader.ReadString());
-        
+
         Assert.IsTrue(reader.Read());
         Assert.AreEqual(-123, reader.ReadInt32());
-        
+
         Assert.IsTrue(reader.Read());
         Assert.AreEqual(9876543210L, reader.ReadInt64());
-        
+
         Assert.IsTrue(reader.Read());
         Assert.AreEqual(3.14159, reader.ReadDouble(), 0.00001);
-        
+
         Assert.IsTrue(reader.Read());
         Assert.IsFalse(reader.ReadBoolean());
-        
+
         Assert.IsTrue(reader.Read());
         Assert.AreEqual(BsonType.Null, reader.CurrentType);
-        
+
         Assert.IsTrue(reader.Read());
         Assert.AreEqual(testDate, reader.ReadDateTime());
-        
+
         Assert.IsTrue(reader.Read());
         Assert.AreEqual(testGuid, reader.ReadGuid());
-        
+
         Assert.IsTrue(reader.Read());
         var (data, subType) = reader.ReadBinary();
         CollectionAssert.AreEqual(testBinary, data);
-        
+
         Assert.IsFalse(reader.Read());
         reader.ReadEndDocument();
     }
@@ -267,7 +267,7 @@ public sealed class BsonWriterReaderTests
     public void WriteAndReadFromByteArray()
     {
         byte[] bsonData;
-        
+
         using (var ms = new MemoryStream())
         {
             using var writer = new BsonWriter(ms);
@@ -279,11 +279,11 @@ public sealed class BsonWriterReaderTests
 
         using var reader = new BsonReader(bsonData);
         reader.ReadStartDocument();
-        
+
         Assert.IsTrue(reader.Read());
         Assert.AreEqual("key", reader.CurrentName);
         Assert.AreEqual("value", reader.ReadString());
-        
+
         Assert.IsFalse(reader.Read());
         reader.ReadEndDocument();
     }
@@ -303,15 +303,15 @@ public sealed class BsonWriterReaderTests
         ms.Position = 0;
         using var reader = new BsonReader(ms);
         reader.ReadStartDocument();
-        
+
         Assert.IsTrue(reader.Read());
         Assert.AreEqual("first", reader.CurrentName);
         reader.Skip(); // Skip the string value
-        
+
         Assert.IsTrue(reader.Read());
         Assert.AreEqual("second", reader.CurrentName);
         Assert.AreEqual(42, reader.ReadInt32());
-        
+
         Assert.IsFalse(reader.Read());
         reader.ReadEndDocument();
     }
@@ -331,13 +331,13 @@ public sealed class BsonWriterReaderTests
         ms.Position = 0;
         using var reader = new BsonReader(ms);
         reader.ReadStartDocument();
-        
+
         Assert.IsTrue(reader.Read());
         Assert.AreEqual("hello", reader.ReadValue());
-        
+
         Assert.IsTrue(reader.Read());
         Assert.AreEqual(42, reader.ReadValue());
-        
+
         reader.ReadEndDocument();
     }
 
@@ -355,14 +355,13 @@ public sealed class BsonWriterReaderTests
         ms.Position = 0;
         using var reader = new BsonReader(ms);
         reader.ReadStartDocument();
-        
+
         Assert.IsTrue(reader.Read());
         Assert.AreEqual("pattern", reader.CurrentName);
         var (pattern, options) = reader.ReadRegex();
         Assert.AreEqual("^test.*$", pattern);
         Assert.AreEqual("im", options);
-        
+
         reader.ReadEndDocument();
     }
 }
-

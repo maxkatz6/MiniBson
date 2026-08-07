@@ -68,7 +68,7 @@ public sealed class NewtonsoftBsonCrossTests
         // Read with Newtonsoft
         ms.Position = 0;
         using var reader = new BsonDataReader(ms);
-        
+
         Assert.IsTrue(reader.Read()); // StartObject
         Assert.AreEqual(JsonToken.StartObject, reader.TokenType);
 
@@ -164,11 +164,11 @@ public sealed class NewtonsoftBsonCrossTests
 
         ms.Position = 0;
         using var reader = new BsonDataReader(ms);
-        
+
         Assert.IsTrue(reader.Read()); // StartObject
         Assert.IsTrue(reader.Read()); // PropertyName: items
         Assert.AreEqual("items", reader.Value);
-        
+
         Assert.IsTrue(reader.Read()); // StartArray
         Assert.AreEqual(JsonToken.StartArray, reader.TokenType);
 
@@ -260,7 +260,7 @@ public sealed class NewtonsoftBsonCrossTests
         Assert.AreEqual("timestamp", newtonsoftReader.Value);
         Assert.IsTrue(newtonsoftReader.Read()); // Date value
         Assert.AreEqual(JsonToken.Date, newtonsoftReader.TokenType);
-        
+
         var readDate = (DateTime)newtonsoftReader.Value!;
         Assert.AreEqual(testDate, readDate.ToUniversalTime());
     }
@@ -291,7 +291,7 @@ public sealed class NewtonsoftBsonCrossTests
         Assert.IsTrue(reader.Read());
         Assert.AreEqual("date", reader.CurrentName);
         Assert.AreEqual(BsonType.DateTime, reader.CurrentType);
-        
+
         var readDate = reader.ReadDateTime();
         Assert.AreEqual(testDate, readDate);
     }
@@ -322,7 +322,7 @@ public sealed class NewtonsoftBsonCrossTests
         Assert.AreEqual("data", newtonsoftReader.Value);
         Assert.IsTrue(newtonsoftReader.Read()); // Bytes value
         Assert.AreEqual(JsonToken.Bytes, newtonsoftReader.TokenType);
-        
+
         CollectionAssert.AreEqual(testData, (byte[])newtonsoftReader.Value!);
     }
 
@@ -352,7 +352,7 @@ public sealed class NewtonsoftBsonCrossTests
         Assert.IsTrue(reader.Read());
         Assert.AreEqual("bytes", reader.CurrentName);
         Assert.AreEqual(BsonType.Binary, reader.CurrentType);
-        
+
         var (data, subType) = reader.ReadBinary();
         CollectionAssert.AreEqual(testData, data);
     }
@@ -504,4 +504,3 @@ public sealed class NewtonsoftBsonCrossTests
         reader.ReadEndDocument(); // End document
     }
 }
-

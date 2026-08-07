@@ -1,4 +1,4 @@
-﻿using MiniBson;
+using MiniBson;
 
 namespace MiniBson.Tests;
 
@@ -980,7 +980,7 @@ public sealed class BsonGeneratorTests
         Assert.AreEqual("Numbers", reader.CurrentName);
         Assert.AreEqual(BsonType.Array, reader.CurrentType);
         reader.ReadStartArray();
-        
+
         Assert.IsTrue(reader.Read());
         Assert.AreEqual(10, reader.ReadInt32());
         Assert.IsTrue(reader.Read());
@@ -992,7 +992,7 @@ public sealed class BsonGeneratorTests
         Assert.AreEqual("Tags", reader.CurrentName);
         Assert.AreEqual(BsonType.Array, reader.CurrentType);
         reader.ReadStartArray();
-        
+
         Assert.IsTrue(reader.Read());
         Assert.AreEqual("x", reader.ReadString());
         Assert.IsTrue(reader.Read());
@@ -1192,6 +1192,3 @@ public sealed class BsonGeneratorTests
         Assert.IsNull(result, "Chain should end after the final node.");
     }
 }
-
-
-

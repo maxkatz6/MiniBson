@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Linq;
@@ -907,7 +907,7 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
 
         // Create and return the object
         var properties = type.Properties.ToList();
-        
+
         // Check if type is a record
         var isRecord = type.IsRecord;
 
@@ -1219,18 +1219,18 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         // Collect types from derived to base
         var typeHierarchy = new List<INamedTypeSymbol>();
         var currentType = type;
-        
+
         while (currentType != null && currentType.SpecialType != SpecialType.System_Object)
         {
             typeHierarchy.Add(currentType);
             currentType = currentType.BaseType;
         }
-        
+
         // Process in derived-to-base order (no reversal)
         // This means properties from the most derived class come first
         var properties = new List<IPropertySymbol>();
         var seenPropertyNames = new HashSet<string>();
-        
+
         foreach (var typeInHierarchy in typeHierarchy)
         {
             foreach (var member in typeInHierarchy.GetMembers())
@@ -1248,7 +1248,7 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
                 }
             }
         }
-        
+
         return properties;
     }
 

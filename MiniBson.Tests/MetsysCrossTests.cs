@@ -159,7 +159,7 @@ public class MetsysCrossTests
         Assert.AreEqual((byte)'a', result[28]);
         Assert.AreEqual((byte)0, result[29]);
         Assert.AreEqual((byte)0, result[30]); //sub document eoo
-        Assert.AreEqual((byte)0, result[31]); //main document eoo       
+        Assert.AreEqual((byte)0, result[31]); //main document eoo
     }
 
     [TestMethod]
@@ -190,7 +190,7 @@ public class MetsysCrossTests
         Assert.AreEqual(0, result[30]); //3rd element name eoo
         Assert.AreEqual(1, BitConverter.ToInt32(result, 31));
         Assert.AreEqual((byte)0, result[35]); //sub document eoo
-        Assert.AreEqual((byte)0, result[36]); //main document eoo                
+        Assert.AreEqual((byte)0, result[36]); //main document eoo
     }
 
     [TestMethod]
@@ -220,7 +220,7 @@ public class MetsysCrossTests
         Assert.AreEqual(0, result[30]); //3rd element name eoo
         Assert.AreEqual(1, BitConverter.ToInt32(result, 31));
         Assert.AreEqual((byte)0, result[35]); //sub document eoo
-        Assert.AreEqual((byte)0, result[36]); //main document eoo                
+        Assert.AreEqual((byte)0, result[36]); //main document eoo
     }
 
     [TestMethod]
@@ -299,7 +299,7 @@ public class MetsysCrossTests
 
         Assert.AreEqual(43, BitConverter.ToInt32(result, 0)); //length
         Assert.AreEqual(3, result[4]); //type
-        Assert.AreEqual(32, BitConverter.ToInt32(result, 10)); //subdocument length    
+        Assert.AreEqual(32, BitConverter.ToInt32(result, 10)); //subdocument length
         Assert.AreEqual(16, result[14]); //1st argument type
         Assert.AreEqual((byte)'f', result[15]);
         Assert.AreEqual((byte)'i', result[16]);
@@ -333,7 +333,7 @@ public class MetsysCrossTests
             w.WriteNull("Nint");
             w.WriteNull("String");
         });
-        Assert.AreEqual(19, BitConverter.ToInt32(result, 0)); //length 
-        Assert.AreEqual(10, result[4]); //type          
+        Assert.AreEqual(19, BitConverter.ToInt32(result, 0)); //length
+        Assert.AreEqual(10, result[4]); //type
     }
 }

@@ -1,4 +1,4 @@
-﻿namespace MiniBson;
+namespace MiniBson;
 
 #if MINIBSON_PUBLIC
 /// <summary>
