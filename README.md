@@ -83,8 +83,7 @@ object? Deserialize(BsonReader reader, Type type);
 int GetSerializedSize(object input);
 ```
 
-`GetSerializedSize` returns the number of bytes that `Serialize` writes, but it writes no bytes
-itself. Use it for these tasks:
+`GetSerializedSize` returns the number of bytes that `Serialize` writes, but it writes no bytes itself. Use it for these tasks:
 
 - Allocate a buffer before you serialize.
 - Put a length in front of a message before you send it.
@@ -100,10 +99,7 @@ using var writer = new BsonWriter(socket, leaveOpen: true);
 context.Serialize(person, writer);
 ```
 
-The number is exact. It is not an estimate. It is the same number that the writer computes when
-the destination cannot seek, and the writer throws an exception if the two numbers disagree.
-This is true only if each property returns the same value two times. See
-[Streams that cannot seek](#streams-that-cannot-seek).
+The number is exact. It is not an estimate. It is the same number that the writer computes when the destination cannot seek, and the writer throws an exception if the two numbers disagree. This is true only if each property returns the same value two times. See [Streams that cannot seek](#streams-that-cannot-seek).
 
 ### Model behavior
 
@@ -116,28 +112,18 @@ This is true only if each property returns the same value two times. See
 
 ### Streams that cannot seek
 
-A context can serialize and deserialize over all streams. This includes a stream that cannot
-seek.
+A context can serialize and deserialize over all streams. This includes a stream that cannot seek.
 
-If the destination cannot seek, the generated code computes the length of each document first.
-Thus it writes no length later. If the destination can seek, the code does not do that work.
-`BsonWriter` writes each length later instead, which is faster. A deserializer needs no
-equivalent test, because `BsonReader` never does a seek backwards.
+If the destination cannot seek, the generated code computes the length of each document first. Thus it writes no length later. If the destination can seek, the code does not do that work. `BsonWriter` writes each length later instead, which is faster. A deserializer needs no equivalent test, because `BsonReader` never does a seek backwards.
 
-This behavior has no cost, but it adds one rule for your models: **a property must return the
-same value two times**. The measure pass and the write pass read the object graph separately.
-If a property gives a different value to each pass, the computed length is wrong. These
-properties are examples:
+This behavior has no cost, but it adds one rule for your models: **a property must return the same value two times**. The measure pass and the write pass read the object graph separately. If a property gives a different value to each pass, the computed length is wrong. These properties are examples:
 
 - A computed property that returns a new array each time.
 - A property on an object that a different thread changes at the same time.
 
-`WriteEndDocument()` finds the disagreement and throws an `InvalidOperationException`. It
-writes no bad document.
+`WriteEndDocument()` finds the disagreement and throws an `InvalidOperationException`. It writes no bad document.
 
-This test runs only when the destination cannot seek. Thus such a property can pass with a
-`MemoryStream` and fail with a socket. If your models have computed properties, test both
-destinations.
+This test runs only when the destination cannot seek. Thus such a property can pass with a `MemoryStream` and fail with a socket. If your models have computed properties, test both destinations.
 
 ### Supported model types
 
@@ -166,21 +152,17 @@ destinations.
 - A record must be positional. Its constructor must accept each property in the generated order.
 - A context must be a partial class. MiniBson ignores a context that is not partial, and it gives no diagnostic.
 
-A property that MiniBson does not support gives the compiler error `MINIBSON001`. The error
-points at that property:
+A property that MiniBson does not support gives the compiler error `MINIBSON001`. The error points at that property:
 
 ```text
 error MINIBSON001: MiniBson cannot serialize 'Order.Total': type 'decimal' is not supported
 ```
 
-A different severity for the diagnostic does not add support. The generated code contains a
-fallback that throws a `NotSupportedException`. Thus such a property cannot give an empty value
-with no error.
+A different severity for the diagnostic does not add support. The generated code contains a fallback that throws a `NotSupportedException`. Thus such a property cannot give an empty value with no error.
 
 ## Low-level reader and writer
 
-Use the low-level API if you need direct control of the BSON document. Use it also if you do
-not want model types.
+Use the low-level API if you need direct control of the BSON document. Use it also if you do not want model types.
 
 ### Write a document
 
@@ -260,36 +242,24 @@ reader.ReadEndDocument();
 | Int64 | `WriteInt64` | `ReadInt64` |
 | UUID | `WriteGuid` | `ReadGuid` |
 
-An array is a document on the wire. Thus `ReadEndArray` and `ReadEndDocument` are one method
-with two names. Use the name that agrees with your write code.
+An array is a document on the wire. Thus `ReadEndArray` and `ReadEndDocument` are one method with two names. Use the name that agrees with your write code.
 
-`Skip()` also accepts each deprecated type in the specification: `Undefined`, `DBPointer`,
-`Symbol`, `JavaScriptWithScope`, `Decimal128`, `MinKey`, and `MaxKey`. This is true even when
-there is no accessor for the value. Generated deserializers skip each element that they do not
-know. Thus a document with one of these types stays readable.
+`Skip()` also accepts each deprecated type in the specification: `Undefined`, `DBPointer`, `Symbol`, `JavaScriptWithScope`, `Decimal128`, `MinKey`, and `MaxKey`. This is true even when there is no accessor for the value. Generated deserializers skip each element that they do not know. Thus a document with one of these types stays readable.
 
-A reader from a `byte[]` or a `ReadOnlyMemory<byte>` uses your memory directly. On that path,
-`ReadBinaryAsMemory()` returns a slice of your input and makes no copy. If you need a separate
-copy, use `ReadBinary()`.
+A reader from a `byte[]` or a `ReadOnlyMemory<byte>` uses your memory directly. On that path, `ReadBinaryAsMemory()` returns a slice of your input and makes no copy. If you need a separate copy, use `ReadBinary()`.
 
 ### Streams and document lengths
 
-A BSON document starts with its total length. The writer does not know that length until the
-document is complete. `BsonWriter` has two solutions:
+A BSON document starts with its total length. The writer does not know that length until the document is complete. `BsonWriter` has two solutions:
 
 | Destination | How to start a document | Cost |
 | --- | --- | --- |
 | A stream that can seek | `WriteStartDocument()` | The writer writes a placeholder, then `WriteEndDocument()` writes the correct length |
 | Any stream | `WriteStartDocument(length)` | You supply the length, and the writer does not go back |
 
-Only the second form works with a stream that cannot seek, such as a network stream or a pipe
-stream. If you start a document there without a length, the writer throws an
-`InvalidOperationException`. `WriteStartDocument(string, int)`, `WriteStartArray(string, int)`,
-`WriteStartNestedDocument(int)`, and `WriteStartNestedArray(int)` accept a length in the same
-manner.
+Only the second form works with a stream that cannot seek, such as a network stream or a pipe stream. If you start a document there without a length, the writer throws an `InvalidOperationException`. `WriteStartDocument(string, int)`, `WriteStartArray(string, int)`, `WriteStartNestedDocument(int)`, and `WriteStartNestedArray(int)` accept a length in the same manner.
 
-The length is the length of the complete document. It includes the four-byte prefix and the
-null byte at the end. `BsonSize` gives you the parts:
+The length is the length of the complete document. It includes the four-byte prefix and the null byte at the end. `BsonSize` gives you the parts:
 
 ```csharp
 var length = BsonSize.DocumentOverhead
@@ -303,41 +273,25 @@ writer.WriteInt32("age", 37);
 writer.WriteEndDocument();
 ```
 
-If your length does not agree with the bytes that the writer wrote, `WriteEndDocument()` throws
-an exception. It writes no bad document. `RequiresKnownLength` tells you if the destination
-needs a length from you.
+If your length does not agree with the bytes that the writer wrote, `WriteEndDocument()` throws an exception. It writes no bad document. `RequiresKnownLength` tells you if the destination needs a length from you.
 
-A generated serializer does all of this for you. See
-[Streams that cannot seek](#streams-that-cannot-seek).
+A generated serializer does all of this for you. See [Streams that cannot seek](#streams-that-cannot-seek).
 
-`BsonReader` works with all streams. It keeps its own position and does not ask the stream. If
-the stream cannot seek, a skip reads those bytes and discards them. A reader consumes its own
-document and no more bytes. Thus you can read a stream that holds a sequence of documents one
-document at a time.
+`BsonReader` works with all streams. It keeps its own position and does not ask the stream. If the stream cannot seek, a skip reads those bytes and discards them. A reader consumes its own document and no more bytes. Thus you can read a stream that holds a sequence of documents one document at a time.
 
 ### Buffers
 
-`BsonWriter` keeps bytes in a buffer of a fixed length. It does not write each value directly
-to the stream. The buffer length does not increase with the document length, and a value that
-is longer than the buffer goes directly to the stream.
+`BsonWriter` keeps bytes in a buffer of a fixed length. It does not write each value directly to the stream. The buffer length does not increase with the document length, and a value that is longer than the buffer goes directly to the stream.
 
-`WriteEndDocument()` on the top-level document drains the buffer. Thus a complete document is
-always on the destination. If you read a `MemoryStream` after that call, you get the full
-document. The writer holds back only an open document, and `Flush()` writes that to the
-destination.
+`WriteEndDocument()` on the top-level document drains the buffer. Thus a complete document is always on the destination. If you read a `MemoryStream` after that call, you get the full document. The writer holds back only an open document, and `Flush()` writes that to the destination.
 
-`Flush()` also flushes the stream, and `Dispose` does the same. This is important when the
-destination has its own buffer. A `BufferedStream`, a `GZipStream`, and a `FileStream` that you
-keep open are examples.
+`Flush()` also flushes the stream, and `Dispose` does the same. This is important when the destination has its own buffer. A `BufferedStream`, a `GZipStream`, and a `FileStream` that you keep open are examples.
 
-`BsonReader` also reads ahead into a window. It never reads past the end of its current
-document. Thus a stream that holds a sequence of documents stays readable one document at a
-time.
+`BsonReader` also reads ahead into a window. It never reads past the end of its current document. Thus a stream that holds a sequence of documents stays readable one document at a time.
 
 ## How to contribute
 
-See [DEVELOPMENT.md](DEVELOPMENT.md) for the repository structure, the design notes, the tests,
-the package commands, and the documentation rules.
+See [DEVELOPMENT.md](DEVELOPMENT.md) for the repository structure, the design notes, the tests, the package commands, and the documentation rules.
 
 ## Acknowledgments
 
