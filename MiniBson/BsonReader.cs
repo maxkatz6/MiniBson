@@ -58,9 +58,10 @@ internal ref struct BsonReader
     private long _end;
 
     /// <summary>
-    /// The end of the outermost open document, or <see cref="_end"/> when no document is open.
+    /// The end of the innermost open document, or <see cref="_end"/> when no document is open.
     /// One test against this value covers the end of the document and the end of the input. Thus
-    /// no read tests them separately.
+    /// no read tests them separately. It follows the open frame, so a value inside a nested
+    /// document cannot reach the bytes of the document that contains it.
     /// </summary>
     private long _limit;
 
@@ -203,10 +204,10 @@ internal ref struct BsonReader
         if (endMarker != 0)
             throw new InvalidDataException($"Expected end of document marker (0x00), got 0x{endMarker:X2}");
 
-        // The reader left the outermost document. Thus the next document in the same input can
-        // set its own end.
-        if (_depth == 0)
-            _limit = _end;
+        // The reader left this document. The limit returns to the end of the document that
+        // contains it, or to the end of the input, so that the next document in the same input
+        // can set its own end. This runs after the two reads above, which the old limit bounds.
+        _limit = _depth == 0 ? _end : PeekEnd();
     }
 
     /// <summary>
@@ -234,8 +235,6 @@ internal ref struct BsonReader
                 throw new InvalidDataException(
                     $"A document declares {length} bytes, but the input holds {_end - start}.");
             }
-
-            _limit = endPosition;
         }
         else if (endPosition > PeekEnd())
         {
@@ -245,6 +244,7 @@ internal ref struct BsonReader
                 $"A nested document declares {length} bytes, which does not fit in the document containing it.");
         }
 
+        _limit = endPosition;
         PushFrame(endPosition, isArray);
     }
 
@@ -419,7 +419,17 @@ internal ref struct BsonReader
         var subType = (BsonBinarySubType)ReadByteCore();
 
         if (subType == BsonBinarySubType.BinaryOld)
-            dataLength = ReadLengthCore(0, "A binary value");
+        {
+            var innerLength = ReadLengthCore(0, "A binary value");
+            if (innerLength != dataLength - 4)
+            {
+                throw new InvalidDataException(
+                    $"A BinaryOld value declares {dataLength} bytes and then {innerLength} bytes inside them; " +
+                    $"the inner length must be {dataLength - 4}.");
+            }
+
+            dataLength = innerLength;
+        }
 
         EnsureWithinLimit(dataLength);
 
@@ -660,7 +670,7 @@ internal ref struct BsonReader
     /// <see langword="params"/> array, which allocates memory. Only the failure path allocates
     /// it, and there the exception costs more than the array.
     /// </summary>
-    private readonly InvalidOperationException UnexpectedType(params BsonType[] expected) =>
+    private readonly InvalidDataException UnexpectedType(params BsonType[] expected) =>
         new(expected.Length == 1
             ? $"Expected {expected[0]}, but current type is {_type}."
             : $"Expected one of [{string.Join(", ", expected)}], but current type is {_type}.");

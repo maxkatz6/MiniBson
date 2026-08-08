@@ -358,6 +358,83 @@ public sealed class BsonReaderLimitTests
         ReaderAssert.Throws<InvalidDataException>(ref reader, (ref BsonReader r) => r.Read());
     }
 
+    [TestMethod]
+    public void AnUnterminatedNameInsideANestedDocumentStopsAtThatDocumentsEnd()
+    {
+        // The value has no zero byte in it. Thus the two zero bytes that the corruption below
+        // removes are the only ones inside the nested document.
+        var document = Write(w =>
+        {
+            w.Document("sub", d => d.WriteInt32("i", 0x01010101));
+            w.WriteInt32("after", 7);
+        });
+
+        // Root length, type byte, "sub\0", nested length, type byte, "i".
+        const int nameTerminator = 4 + 1 + 4 + 4 + 1 + 1;
+        const int nestedTerminator = nameTerminator + 1 + 4; // the terminator, the int32
+
+        Assert.AreEqual(0, document[nameTerminator]);
+        Assert.AreEqual(0, document[nestedTerminator]);
+
+        document[nameTerminator] = (byte)'x';
+        document[nestedTerminator] = (byte)'x';
+
+        var reader = new BsonReader(document);
+        reader.ReadStartDocument();
+        Assert.IsTrue(reader.Read());
+        reader.ReadStartNestedDocument();
+
+        ReaderAssert.Throws<InvalidDataException>(ref reader, (ref BsonReader r) => r.Read());
+    }
+
+    [TestMethod]
+    public void BinaryOldWithAnInnerLengthThatDisagreesWithTheOuterOneThrows()
+    {
+        var document = Write(w =>
+        {
+            w.WriteBinary("bin", [1, 2, 3, 4], BsonBinarySubType.BinaryOld);
+            w.WriteInt32("after", 7);
+        });
+
+        // Root length, type byte, "bin\0", outer length, subtype byte.
+        const int innerLengthOffset = 4 + 1 + 4 + 4 + 1;
+        Assert.AreEqual(4, BitConverter.ToInt32(document, innerLengthOffset));
+
+        BitConverter.GetBytes(12).CopyTo(document, innerLengthOffset);
+
+        var reader = new BsonReader(document);
+        reader.ReadStartDocument();
+        Assert.IsTrue(reader.Read());
+
+        var ex = ReaderAssert.Throws<InvalidDataException>(ref reader, (ref BsonReader r) => r.ReadBinary(out _));
+        StringAssert.Contains(ex.Message, "the inner length must be");
+    }
+
+    [TestMethod]
+    public void AWrongTypeInTheInputThrowsInvalidDataException()
+    {
+        var document = Write(w =>
+        {
+            w.WriteString("text", "value");
+            w.WriteInt32("number", 1);
+        });
+
+        var reader = new BsonReader(document);
+        reader.ReadStartDocument();
+
+        // The number readers, which test the type in a switch.
+        Assert.IsTrue(reader.Read());
+        ReaderAssert.Throws<InvalidDataException>(ref reader, (ref BsonReader r) => r.ReadInt32());
+
+        // EnsureType, which every other accessor uses.
+        var second = new BsonReader(document);
+        second.ReadStartDocument();
+        Assert.IsTrue(second.Read());
+        second.Skip();
+        Assert.IsTrue(second.Read());
+        ReaderAssert.Throws<InvalidDataException>(ref second, (ref BsonReader r) => r.ReadString());
+    }
+
     /// <summary>
     /// <see cref="BsonReader.CurrentName"/> decodes the name when the caller reads the property.
     /// Thus a reader that only skips must still give the correct name on request.
