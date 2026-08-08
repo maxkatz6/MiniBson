@@ -60,7 +60,7 @@
     </PropertyGroup>
 
     <ItemGroup Condition="'$(MiniBsonPackageAsSource)' == 'true'">
-        <Content Include="$(MSBuildProjectDirectory)\*.cs" Exclude="$(MSBuildProjectDirectory)\obj\**">
+        <Content Include="$(MSBuildProjectDirectory)\**\*.cs" Exclude="$(MSBuildProjectDirectory)\obj\**">
             <Pack>true</Pack>
             <PackagePath>contentFiles\cs\any\MiniBson\</PackagePath>
             <BuildAction>Compile</BuildAction>
