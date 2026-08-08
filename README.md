@@ -64,14 +64,14 @@ var original = new Person
     Tags = ["compiler", "math"]
 };
 
-using var output = new BsonBufferWriter(context.GetSerializedSize(original));
+var output = new ArrayBufferWriter<byte>(context.GetSerializedSize(original));
 context.Serialize(original, new BsonWriter(output));
 
 var reader = new BsonReader(output.WrittenSpan);
 var copy = (Person?)context.Deserialize(ref reader, typeof(Person));
 ```
 
-`BsonBufferWriter` is the destination that MiniBson supplies. Any `IBufferWriter<byte>` works, including `ArrayBufferWriter<byte>` and `PipeWriter`.
+The destination is any `IBufferWriter<byte>`, including `ArrayBufferWriter<byte>` and `PipeWriter`. On `netstandard2.0`, where `System.Buffers.ArrayBufferWriter<T>` does not exist, MiniBson supplies `MiniBson.Polyfills.ArrayBufferWriter<T>` with the same shape.
 
 Each context has these methods:
 
@@ -100,7 +100,7 @@ context.Serialize(person, new BsonWriter(pipe));
 
 The number is exact. It is not an estimate. It is the same number that `Serialize` computes for itself, and the writer throws an exception if the two numbers disagree. This is true only if each property returns the same value two times. See [Document lengths](#document-lengths).
 
-Give the number to `BsonBufferWriter`. It then rents one buffer, does not grow, and makes no copy.
+Give the number to the constructor of `ArrayBufferWriter<byte>`. It then allocates one buffer of that size and does not grow.
 
 ### Model behavior
 
@@ -122,7 +122,7 @@ This costs one more walk of your object graph, and it adds one rule for your mod
 
 `WriteEndDocument()` finds the disagreement and throws an `InvalidOperationException`. It writes no bad document. This test runs on every write. Thus there is no destination where such a property passes without an error.
 
-When the test throws, the destination can already hold some bytes. Discard them. Do not use them. `BsonBufferWriter.Clear()` does this.
+When the test throws, the destination can already hold some bytes. Discard them. Do not use them. `ArrayBufferWriter<byte>.Clear()` does this.
 
 ### Supported model types
 
@@ -177,7 +177,7 @@ var length = BsonSize.DocumentOverhead
     + BsonSize.Element("active") + BsonSize.Boolean
     + BsonSize.Element("tags") + tagsLength;
 
-using var output = new BsonBufferWriter(length);
+var output = new ArrayBufferWriter<byte>(length);
 var writer = new BsonWriter(output);
 
 writer.WriteStartDocument(length);
@@ -192,7 +192,7 @@ writer.WriteEndArray();
 
 writer.WriteEndDocument();
 
-byte[] bson = output.ToArray();
+byte[] bson = output.WrittenSpan.ToArray();
 ```
 
 To avoid this arithmetic, use the source generator. See [Source-generated serialization](#source-generated-serialization).
@@ -245,6 +245,8 @@ The full document must be in memory. With a `PipeReader`, read the four-byte len
 
 `BsonReader` is a `ref struct`, the same as `Utf8JsonReader`. It cannot cross an `await`, a lambda cannot capture it, and a class cannot hold it in a field. Pass it as `ref BsonReader`.
 
+Every failure that the input causes is an `InvalidDataException`: a truncated document, a length that cannot be correct, a name with no terminator, and a read of the wrong type for the current element. Thus one `catch` covers a parse of bytes that you do not trust. An `InvalidOperationException` means the calling code is wrong, such as a `Read()` before `ReadStartDocument()`.
+
 ### Supported BSON values
 
 | BSON value | Write API | Read API |
@@ -296,7 +298,7 @@ A generated serializer computes all of this for you. See [Document lengths](#doc
 
 The writer asks the destination for adjacent bytes only for a scalar or the digits of an array index. That is twelve bytes at the most. A longer value fills a buffer, commits it, and takes another one. A destination that gives one byte at a time works.
 
-`BsonBufferWriter` is a pooled destination that can grow. Construct it with the number from `GetSerializedSize`, and it rents one time and does not grow. Its members are `WrittenSpan`, `WrittenMemory`, `Clear()`, and `Dispose()`. A later write makes a span or memory from an earlier call invalid.
+`ArrayBufferWriter<byte>` is the destination for a document that you keep in memory. Construct it with the number from `GetSerializedSize`, and it allocates one time and does not grow. Read the result from `WrittenSpan` or `WrittenMemory`, and call `Clear()` to reuse it. A later write makes a span or memory from an earlier call invalid.
 
 ## Migrating from 1.x
 
@@ -316,10 +318,10 @@ Version 2.0 removed `Stream` from the API. The wire format did not change, so do
 | `reader.ReadObjectId()` returning `byte[]` | Returns a `ReadOnlySpan<byte>`. Call `.ToArray()` for the old behavior. |
 | `EndOfStreamException` on truncated input | `InvalidDataException` |
 
-To bridge a `Stream` on the write side, write into a `BsonBufferWriter` and copy:
+To bridge a `Stream` on the write side, write into an `ArrayBufferWriter<byte>` and copy:
 
 ```csharp
-using var output = new BsonBufferWriter(context.GetSerializedSize(value));
+var output = new ArrayBufferWriter<byte>(context.GetSerializedSize(value));
 context.Serialize(value, new BsonWriter(output));
 stream.Write(output.WrittenSpan);
 ```

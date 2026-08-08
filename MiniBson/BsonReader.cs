@@ -10,19 +10,6 @@ namespace MiniBson;
 /// <summary>
 /// A low-level, forward-only BSON reader over caller memory.
 /// </summary>
-/// <remarks>
-/// <para>
-/// The reader does not copy the input and does not own it. It is a <see langword="ref"/>
-/// <see langword="struct"/> for that reason. The compiler then keeps the reader, and each span it
-/// returns, inside the lifetime of the input. This gives the reader the same rules as
-/// <c>Utf8JsonReader</c>. It cannot cross an <c>await</c>, a lambda cannot capture it, and a class
-/// cannot hold it in a field.
-/// </para>
-/// <para>
-/// The full document must be in memory before you construct a reader. Read the four-byte length
-/// first, wait for that number of bytes, and then give the reader that slice.
-/// </para>
-/// </remarks>
 #if MINIBSON_PUBLIC
 public ref struct BsonReader
 #else
@@ -76,8 +63,7 @@ internal ref struct BsonReader
     private string? _name;
 
     /// <summary>
-    /// Reads from a span. This form is the fastest. It is also the only form where
-    /// <see cref="ReadBinaryMemory"/> copies.
+    /// Reads from a span. This form is the fastest.
     /// </summary>
     public BsonReader(ReadOnlySpan<byte> data)
     {
@@ -107,8 +93,7 @@ internal ref struct BsonReader
     }
 
     /// <summary>
-    /// Reads from a sequence, which is the form that a <c>PipeReader</c> gives. The reader joins
-    /// a value that lies across two segments. A value inside one segment costs nothing more.
+    /// Reads from a sequence. The reader joins a value that lies across two segments. A value inside one segment costs nothing more.
     /// </summary>
     public BsonReader(in ReadOnlySequence<byte> data)
     {

@@ -16,7 +16,7 @@ The `global.json` file selects the .NET 10 SDK. Its `rollForward` setting also l
 
 The implementation has two layers:
 
-1. `BsonReader`, `BsonWriter`, and `BsonSize` know the BSON wire format. They know nothing about models. The `BsonType` and `BsonBinarySubType` enums are in `BsonTypes.cs`, because the reader and the writer both use them. `BsonBufferWriter` is a destination for the writer, and it knows nothing about BSON. `BsonSizeTable` is the one runtime type that only generated code uses.
+1. `BsonReader`, `BsonWriter`, and `BsonSize` know the BSON wire format. They know nothing about models. The `BsonType` and `BsonBinarySubType` enums are in `BsonTypes.cs`, because the reader and the writer both use them. The writer takes any `IBufferWriter<byte>` as its destination; `Polyfills/ArrayBufferWriter<T>` supplies that type on `netstandard2.0`, and it knows nothing about BSON. `BsonSizeTable` is the one runtime type that only generated code uses.
 2. The generator writes model-specific code. That code calls the low-level API.
 
 Keep the BSON format rules in the runtime layer. A change to the generator must use the reader and writer operations. Do not put format rules in the generator a second time.
@@ -179,27 +179,6 @@ The generator starts with `ForAttributeWithMetadataName`. It then sends records 
 Do not put an `ISymbol`, a `SyntaxNode`, or another object of the compilation in that model. These objects compare by reference and hold the compilation in memory, and they stop the incremental cache. An array and an `ImmutableArray<T>` also compare by reference, which is the reason for `EquatableList<T>`. The `LocationInfo` type holds a source location as a value for the same reason.
 
 ## Test suite
-
-Each test file has one responsibility:
-
-| File | Focus |
-| --- | --- |
-| `BsonWriterReaderTests.cs` | Low-level round trips, validation, the `Skip` method, and zero-copy binary reads |
-| `BsonSizeTests.cs` | Each `BsonSize` helper against the bytes that the writer wrote |
-| `BsonWriterOutputTests.cs` | The writer against destinations that hand out one, two, three, or seven bytes at a time |
-| `BsonWriterKnownLengthTests.cs` | Lengths from the caller, the length test, and the array index rules |
-| `BsonBufferWriterTests.cs` | The `IBufferWriter<byte>` contract for `BsonBufferWriter` |
-| `BsonReaderLimitTests.cs` | Bad lengths, slice bounds, and reads across sequential documents |
-| `BsonReaderSequenceTests.cs` | The reader over segmented input, at every split offset |
-| `BsonReaderSkipTests.cs` | Skips across types with no accessor |
-| `BsonGeneratorTests.cs` | Generated serialization for objects, records, inheritance, null values, and arrays |
-| `BsonGeneratorPrimitiveTests.cs` | Scalar, nullable scalar, and scalar array mappings |
-| `BsonGeneratorEnumTests.cs` | Enum underlying types, nullable enums, arrays, and nested enums |
-| `BsonGeneratorSizeTests.cs` | Generated `GetSerializedSize` against the bytes that the writer wrote |
-| `BsonGeneratorDiagnosticTests.cs` | Roslyn assertions for `MINIBSON001` and for valid generator output |
-| `ReadmeExampleTests.cs` | The README examples, compiled and run |
-| `MetsysCrossTests.cs` | Byte-level compatibility with Metsys.Bson |
-| `NewtonsoftBsonCrossTests.cs` | Read and write compatibility with `Newtonsoft.Json.Bson` |
 
 `BsonTestWriter.cs`, `SequenceFactory.cs`, `SegmentedBufferWriter.cs`, and `ReaderAssert.cs` are shared helpers. They are not test classes.
 

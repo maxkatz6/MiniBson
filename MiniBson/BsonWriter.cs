@@ -8,23 +8,10 @@ namespace MiniBson;
 /// <summary>
 /// A low-level, forward-only BSON writer over an <see cref="IBufferWriter{T}"/>.
 /// </summary>
-/// <remarks>
-/// <para>
-/// Each document needs its length before it starts. A BSON document begins with its own length,
-/// and an <see cref="IBufferWriter{T}"/> does not return a byte that it gave out. Thus the writer
-/// cannot write that length later. Compute the length with <see cref="BsonSize"/>, or let a
-/// generated serializer compute it.
-/// </para>
-/// <para>
-/// The writer holds a buffer from the destination and commits it with
-/// <see cref="IBufferWriter{T}.Advance"/>. Thus you must not write to the same destination
-/// yourself while a document is open.
-/// </para>
-/// </remarks>
 #if MINIBSON_PUBLIC
-public sealed class BsonWriter
+public sealed class BsonWriter(IBufferWriter<byte> output)
 #else
-internal sealed class BsonWriter
+internal sealed class BsonWriter(IBufferWriter<byte> output)
 #endif
 {
     // The largest buffer that the writer asks for at one time. A longer document still works. It
@@ -32,7 +19,7 @@ internal sealed class BsonWriter
     // one very large segment.
     private const int MaxSizeHint = 64 * 1024;
 
-    private readonly IBufferWriter<byte> _output;
+    private readonly IBufferWriter<byte> _output = output ?? throw new ArgumentNullException(nameof(output));
 
     // The buffer from the destination. It stays valid until the next GetMemory or Advance call on
     // the destination. A write into it does not make it invalid.
@@ -61,12 +48,6 @@ internal sealed class BsonWriter
         /// the end of a document and the end of an array are the same operation.
         /// </summary>
         public int SavedArrayIndex;
-    }
-
-    /// <param name="output">The destination. <see cref="BsonBufferWriter"/> is one.</param>
-    public BsonWriter(IBufferWriter<byte> output)
-    {
-        _output = output ?? throw new ArgumentNullException(nameof(output));
     }
 
     /// <summary>The number of bytes this writer produced, buffered and committed.</summary>
