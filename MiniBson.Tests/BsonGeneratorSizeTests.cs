@@ -1,4 +1,4 @@
-using MiniBson;
+using System.Buffers;
 
 namespace MiniBson.Tests;
 
@@ -106,7 +106,7 @@ public sealed class BsonGeneratorSizeTests
         var value = new SimpleType { Name = "framed", Age = 1, IsActive = false };
         var size = _context.GetSerializedSize(value);
 
-        using var output = new BsonBufferWriter(size);
+        var output = new ArrayBufferWriter<byte>(size);
         var capacity = output.Capacity;
 
         _context.Serialize(value, new BsonWriter(output));

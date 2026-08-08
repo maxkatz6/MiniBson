@@ -1,4 +1,4 @@
-using MiniBson;
+using System.Buffers;
 
 namespace MiniBson.Tests;
 
@@ -31,7 +31,7 @@ public sealed class ReadmeExampleTests
             Tags = ["compiler", "math"]
         };
 
-        using var output = new BsonBufferWriter(context.GetSerializedSize(original));
+        var output = new ArrayBufferWriter<byte>(context.GetSerializedSize(original));
         context.Serialize(original, new BsonWriter(output));
 
         var reader = new BsonReader(output.WrittenSpan);
@@ -56,7 +56,7 @@ public sealed class ReadmeExampleTests
             + BsonSize.Element("active") + BsonSize.Boolean
             + BsonSize.Element("tags") + tagsLength;
 
-        using var output = new BsonBufferWriter(length);
+        var output = new ArrayBufferWriter<byte>(length);
         var writer = new BsonWriter(output);
 
         writer.WriteStartDocument(length);
@@ -71,7 +71,7 @@ public sealed class ReadmeExampleTests
 
         writer.WriteEndDocument();
 
-        byte[] bson = output.ToArray();
+        var bson = output.WrittenSpan.ToArray();
 
         // The writer throws on a wrong length. Thus this point in the test already shows that the
         // arithmetic above is correct. These two assertions also fix the total.
@@ -127,11 +127,9 @@ public sealed class ReadmeExampleTests
 
         using var stream = new MemoryStream();
 
-        using (var output = new BsonBufferWriter(context.GetSerializedSize(value)))
-        {
-            context.Serialize(value, new BsonWriter(output));
-            stream.Write(output.WrittenSpan);
-        }
+        var output = new ArrayBufferWriter<byte>(context.GetSerializedSize(value));
+        context.Serialize(value, new BsonWriter(output));
+        stream.Write(output.WrittenSpan);
 
         var reader = new BsonReader(stream.ToArray());
         var copy = (Person?)context.Deserialize(ref reader, typeof(Person));
