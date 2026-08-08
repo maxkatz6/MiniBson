@@ -278,8 +278,8 @@ internal sealed class BsonWriter(IBufferWriter<byte> output)
     /// </summary>
     public void WriteObjectId(string name, ReadOnlySpan<byte> value)
     {
-        if (value.Length != 12)
-            throw new ArgumentException("ObjectId must be exactly 12 bytes.", nameof(value));
+        if (value.Length != BsonSize.ObjectId)
+            throw new ArgumentException($"ObjectId must be exactly {BsonSize.ObjectId} bytes.", nameof(value));
 
         WriteType(BsonType.ObjectId);
         WriteCString(name);
