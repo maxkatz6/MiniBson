@@ -10,13 +10,13 @@ The `global.json` file selects the .NET 10 SDK. Its `rollForward` setting also l
 
 | Project | Target frameworks | Responsibility |
 | --- | --- | --- |
-| `MiniBson` | `netstandard2.0`, `net8.0` | BSON reader, writer, and serialization attribute, with no reflection |
+| `MiniBson` | `netstandard2.0`, `net8.0` | BSON reader, writer, buffer writer, and serialization attribute, with no reflection |
 | `MiniBson.Generator` | `netstandard2.0` | Roslyn incremental source generator. It must target `netstandard2.0` to work as an analyzer |
 | `MiniBson.Tests` | `net10.0` | MSTest tests for the runtime, the generator, the diagnostics, the wire format, and compatibility with other BSON tools |
 
 The implementation has two layers:
 
-1. `BsonReader`, `BsonWriter`, and `BsonSize` know the BSON wire format. They know nothing about models. The `BsonType` and `BsonBinarySubType` enums are in `BsonTypes.cs`, because the reader and the writer both use them. `BsonSizeTable` is the one runtime type that only generated code uses.
+1. `BsonReader`, `BsonWriter`, and `BsonSize` know the BSON wire format. They know nothing about models. The `BsonType` and `BsonBinarySubType` enums are in `BsonTypes.cs`, because the reader and the writer both use them. `BsonBufferWriter` is a destination for the writer, and it knows nothing about BSON. `BsonSizeTable` is the one runtime type that only generated code uses.
 2. The generator writes model-specific code. That code calls the low-level API.
 
 Keep the BSON format rules in the runtime layer. A change to the generator must use the reader and writer operations. Do not put format rules in the generator a second time.
@@ -40,57 +40,77 @@ To find the cause of bad generated code, read this output first. It is usually t
 
 ## Runtime design
 
-### Document lengths and the seek operation
+### Why the writer is a class and the reader is a ref struct
 
-A BSON document starts with its total length. The writer does not know that length until the document is complete. There are only three solutions to this problem, and MiniBson uses two of them:
+This difference is deliberate. Do not remove it.
 
-1. **Write the length later.** `WriteStartDocument()` writes a placeholder. `WriteEndDocument` then does a seek back to that placeholder and writes the correct length. This is the fastest solution, but it needs a stream that can seek.
-2. **Compute the length first.** `WriteStartDocument(int)` writes the correct length immediately. This works with all streams. Generated code uses this solution when `RequiresKnownLength` is true.
-3. **Keep the full document in memory, then write it.** MiniBson does not do this. The writer memory would then increase with the document length. Solution 2 gives the same result for generated code, and it does not have that cost.
+The reader **must** be a `ref struct`. Its input is caller memory, and the reader must not copy it or pin it. The ref struct is what makes the compiler keep the reader, and each span that the reader returns, inside the lifetime of that memory.
 
-Because MiniBson does not use solution 3, you must supply the length to the low-level API when the stream cannot seek. If you start a document without a length there, the writer throws an exception.
+The writer's destination is an `IBufferWriter<byte>`, which is an interface and thus an object on the heap. A ref struct writer would remove no allocation. It would only add `ref BsonWriter` to every generated method.
 
-### Reads without a seek
+### Document lengths
 
-`BsonReader` tracks its own position rather than using `Stream.Position`. This lets it enforce document boundaries and work with streams that cannot seek.
+A BSON document starts with its total length, and an `IBufferWriter<byte>` does not return a byte that it gave out. Thus the length must be correct when the document starts. `WriteStartDocument(int)` is the only form.
 
-Skipping can use a forward seek when the stream supports it. Otherwise, the reader consumes and discards the bytes. Preserve both paths because generated deserializers skip elements that they do not know.
+The one other solution is to keep the full document in memory and write it at the end. MiniBson does not do this, because the writer memory would then grow with the document. A measure pass gives the same result without that cost.
 
-### The read window
+`WriteEndDocument` compares the declared length against the bytes written. This is the one test that finds a document with a wrong size, so it must run in each build configuration. It also runs on each write. The old placeholder path made it run on half of them.
 
-All reads use one window over the input. A reader constructed from memory points the window at the caller's memory; a reader constructed from a stream rents and refills a window.
+### The read state machine
 
-Preserve these invariants when changing the reader:
+The reader has one position: `_span` is the current segment, and `_index` is the position in it. For input that is one piece, `_span` is the full input, and the segment code does not run.
 
-- The reader must not consume bytes past the outermost open document. A stream can contain another document or a peer may be waiting for a response.
-- Values and element names can cross refill boundaries or be larger than the window.
-- A memory-backed reader must stay within the caller's slice, not the bounds of its underlying array.
+Nine private methods are the only members that touch the position: `EnsureWithinLimit`, `MoveNextSegment`, `TryPeekContiguous`, `ReadIntoCore`, `Advance`, `TakeContiguous`, `TakeMemory`, `ReadByteCore`, and `TakeCString`. Each public read method is written one time against them. **No code above that layer may test `_isMultiSegment`.**
 
-Keep byte acquisition centralized. A new source, such as a `ReadOnlySequence<byte>` or a `PipeReader`, should change the refill path rather than every read method.
+Two fields were removed on purpose:
 
-### The writer buffer
+- **There is no position field.** `BytesConsumed` is `_segmentStart + _index`. A move to the next segment adds the length of the old segment to `_segmentStart` and sets `_index` to zero, so the position stays correct by construction. A separate counter would be one more field to keep in step.
+- **There is one limit, not two.** `_limit` is the end of the outermost open document, or the end of the input when no document is open. Thus one test in `EnsureWithinLimit` covers the end of the document and the end of the input.
 
-`BsonWriter` uses a fixed-size buffer, so its memory does not grow with the document. Large values go directly to the stream. A completed top-level document must be visible to the caller, while an open document may remain buffered.
+Keep these invariants:
 
-Keep output centralized through the buffer and drain path. A new destination, such as an `IBufferWriter<byte>` or a `PipeWriter`, should change that path rather than every write method. Preserve tests for length placeholders both before and after the buffer has drained.
+- The reader must not consume bytes past the outermost open document. The input can hold another document after this one.
+- A value, an element name, or a length prefix can lie across a segment boundary.
+- A reader over memory must stay inside the caller's *slice* and not inside the bounds of the array behind it. A `ReadOnlyMemory<byte>` is often a view of a larger buffer that holds other documents. A read that used the array bounds could build a value from an adjacent document in place of an error.
+- A `ReadOnlySequence<byte>` can hold an empty segment at any place, including the first and the last. The end of the input is "`TryGet` returned false" and never "the current span is empty".
+- At the end of the outermost document, `_limit` goes back to the end of the input. Without that, the reader cannot read a second document from the same input.
+
+**Scratch buffers:** a pooled buffer is correct when one method rents it and returns it. Do not hold one across method calls, because the reader has no `Dispose` that could return it. A value that leaves the method uses `new byte[]`. A joined binary payload and a name across segments are the two cases.
+
+### The writer output
+
+`BsonWriter` holds a `Memory<byte>` from the destination and a count of the bytes written into it, and commits with `Advance`. This is the model that `Utf8JsonWriter` uses. The contract allows it: the buffer stays valid until the next `GetMemory`, `GetSpan`, or `Advance` call on that destination, and a write into the buffer does not make it invalid. It adds one rule for callers, which the README states. Do not write to the same destination yourself while a document is open.
+
+**Call `Stage(n)` only with an `n` of 12 or fewer.** That is a scalar, or the digits of an array index. It is the one place that asks for adjacent bytes. Each longer value goes through `WriteBytesRaw`, which fills a buffer, commits it, takes another one, and repeats, so it needs no adjacent bytes. Hold this rule in review. It is what lets the writer work with a destination that gives one byte at a time, which `BsonWriterOutputTests` tests with `SegmentedBufferWriter(1)`.
+
+The size hint asks for the bytes that the outermost document still needs. Each length is known, so that number is exact, and a destination that grows by doubling can take its size one time. It is only a hint. A destination that gives fewer bytes still works, and a demand for adjacent bytes would fail with `PipeWriter`.
 
 ### Length computation
 
 `BsonSize` holds the encoded length of each BSON value. Each of its members agrees with one `BsonWriter` method, and you must change the two types together. `BsonSizeTests` compares each helper with the bytes that the writer wrote. That test is necessary, because you can see a wrong length only as a count of bytes.
 
-For a destination that cannot seek, generated code measures every nested document before writing. `BsonSizeTable` carries those lengths from the measure pass to the write pass without repeatedly measuring nested object graphs. A seekable destination skips the measure pass and lets the writer patch lengths later.
+Generated code measures each nested document before it writes that document. `BsonSizeTable` carries those lengths from the measure pass to the write pass, so the code measures a nested object graph one time. The measure pass now runs for every write. Thus `BsonSizeTable` could become a ref struct and save one allocation for each top-level `Serialize`. It is a class today for two reasons: `BsonSizeTable.None` is a `static readonly` field, which a ref struct cannot be, and each `Measure` method would need `ref`.
 
-The measure and write passes read the object graph separately. Mutable or computed properties can therefore make them disagree. `WriteEndDocument` detects this instead of producing a bad document, and generator tests must exercise both seekable and non-seekable destinations.
+The measure pass and the write pass read the object graph separately. Thus a mutable or computed property can make them disagree. `WriteEndDocument` finds that case and writes no bad document.
 
 ## Type classification
 
 `Map(TypeRefInfo)` is the single classification point used by all emitters. To add a scalar BSON type, add a `BsonMapping` member, a `Map` case, and equivalent operations on `BsonWriter`, `BsonReader`, and `BsonSize`. Add byte-level and round-trip tests for the new mapping.
 
-### Buffer-backed reads
+### Zero-copy reads, by constructor
 
-A reader from a `byte[]` or a `ReadOnlyMemory<byte>` puts its window on the caller's memory instead of a rented window. Thus there is no copy and no refill. `ReadBinaryAsMemory()` can therefore return a slice of the caller's memory, and `ReadBinary()` always returns a copy.
+| Constructor | `ReadBinary` (span) | `ReadBinaryMemory` |
+| --- | --- | --- |
+| `ReadOnlySpan<byte>` | Slice | **Copy** — a span has no memory behind it to slice |
+| `ReadOnlyMemory<byte>` | Slice | Slice |
+| `byte[]` | Slice | Slice |
+| `ReadOnlySequence<byte>`, one segment | Slice | Slice |
+| `ReadOnlySequence<byte>`, value inside one segment | Slice | Slice |
+| `ReadOnlySequence<byte>`, value across segments | Copy | Copy |
 
-The window is the caller's *slice*. It is not the full array. A `ReadOnlyMemory<byte>` is frequently a view of a larger buffer that holds other documents. A read that used the bounds of the array could make a value from the bytes of an adjacent document instead of an error.
+`ReadBinaryArray` always copies. Use it for a value that must live longer than the input.
+
+The span constructor with no zero-copy `ReadOnlyMemory` is the one feature that version 2.0 removed. The rule for users is in the README: construct the reader from memory, an array, or a sequence when you want memory back.
 
 ### Numeric conversions
 
@@ -114,11 +134,13 @@ A partial class with one or more `[BsonSerializable(typeof(T))]` attributes beco
 
 ```csharp
 void Serialize(object input, BsonWriter writer);
-object? Deserialize(BsonReader reader, Type type);
+object? Deserialize(ref BsonReader reader, Type type);
 int GetSerializedSize(object input);
 ```
 
-The generated API accepts a reader or a writer. It does not accept a stream. Thus the caller selects the input form and controls the lifetime of the resources.
+The generated API accepts a reader or a writer. It accepts no stream and no buffer. Thus the caller selects the input form and controls the lifetime of the resources.
+
+The reader goes by `ref`, because it is a ref struct. A copy would read the same bytes a second time. Emit `ref BsonReader`, which needs C# 7.2. **Do not emit `scoped`**, which needs C# 11. Generated code compiles in the consumer's project with the consumer's `LangVersion`, and the source package must not raise the version that it already needs. That version is C# 12 today, because the runtime sources use collection expressions.
 
 ### Type discovery and dispatch
 
@@ -162,29 +184,34 @@ Each test file has one responsibility:
 
 | File | Focus |
 | --- | --- |
-| `BsonWriterReaderTests.cs` | Low-level round trips, validation, the `Skip` method, disposal, and zero-copy binary reads |
+| `BsonWriterReaderTests.cs` | Low-level round trips, validation, the `Skip` method, and zero-copy binary reads |
 | `BsonSizeTests.cs` | Each `BsonSize` helper against the bytes that the writer wrote |
-| `BsonWriterBufferingTests.cs` | Buffer limits, values longer than the buffer, and a length written after a drain |
-| `BsonWriterKnownLengthTests.cs` | Lengths from the caller, streams that cannot seek, and the length test |
-| `BsonReaderNonSeekableTests.cs` | Reads and skips without a seek, short reads, and exact document limits |
-| `BsonReaderWindowTests.cs` | The limits of the read window: bad lengths, slice bounds, and reads across sequential documents |
+| `BsonWriterOutputTests.cs` | The writer against destinations that hand out one, two, three, or seven bytes at a time |
+| `BsonWriterKnownLengthTests.cs` | Lengths from the caller, the length test, and the array index rules |
+| `BsonBufferWriterTests.cs` | The `IBufferWriter<byte>` contract for `BsonBufferWriter` |
+| `BsonReaderLimitTests.cs` | Bad lengths, slice bounds, and reads across sequential documents |
+| `BsonReaderSequenceTests.cs` | The reader over segmented input, at every split offset |
+| `BsonReaderSkipTests.cs` | Skips across types with no accessor |
 | `BsonGeneratorTests.cs` | Generated serialization for objects, records, inheritance, null values, and arrays |
 | `BsonGeneratorPrimitiveTests.cs` | Scalar, nullable scalar, and scalar array mappings |
 | `BsonGeneratorEnumTests.cs` | Enum underlying types, nullable enums, arrays, and nested enums |
 | `BsonGeneratorSizeTests.cs` | Generated `GetSerializedSize` against the bytes that the writer wrote |
 | `BsonGeneratorDiagnosticTests.cs` | Roslyn assertions for `MINIBSON001` and for valid generator output |
+| `ReadmeExampleTests.cs` | The README examples, compiled and run |
 | `MetsysCrossTests.cs` | Byte-level compatibility with Metsys.Bson |
 | `NewtonsoftBsonCrossTests.cs` | Read and write compatibility with `Newtonsoft.Json.Bson` |
 
-`NonSeekableStream.cs`, `DualPathWriter.cs`, and `DualPathReader.cs` are shared helpers. They are not test classes.
+`BsonTestWriter.cs`, `SequenceFactory.cs`, `SegmentedBufferWriter.cs`, and `ReaderAssert.cs` are shared helpers. They are not test classes.
 
-`NonSeekableStream` cannot seek and cannot report a position. Its `chunkSize` parameter limits the number of bytes that one `Read` returns. A real network stream returns short reads, and code that expects one call to fill the request is a common error.
+`BsonTestWriter` writes a document body one time to a throwaway writer to learn its length, and then writes it a second time for real. Thus a test states the bytes that it wants and not the arithmetic, and `WriteEndDocument` tests the measurement. Its `Document`, `Array`, `NestedDocument`, and `NestedArray` extension methods do the same for a nested document or array.
 
-`DualPathWriter` serializes a value two times. It uses a length that it writes later, and then a length that it computes first. It then asserts that the two results have the same bytes.
+`SequenceFactory` builds a `ReadOnlySequence<byte>` from a chain of real segments. A sequence from one array has one segment and runs none of the reader's segment code. `AllShapes` gives the standard set. `EverySplit` puts a boundary at each offset in turn. `WithEmptySegments` covers the empty segments that a sequence can hold. `BsonReaderSequenceTests` also asserts that this helper produces many segments. A helper that produced one segment would make each test in that file test nothing.
 
-`DualPathReader` deserializes a value two times. It uses a stream that can seek, and then a stream that cannot seek. `BsonGeneratorTests` compares the two results with a second serialization, because most test models are classes without value equality.
+`SegmentedBufferWriter` is a destination that gives exactly `segmentSize` bytes for any size hint. That is the least that the contract allows. An `ArrayBufferWriter` never does this, so it hides the difference.
 
-The generator test files use both helpers. Thus each model in those files tests all four paths.
+`ReaderAssert` asserts that a reader operation throws. `Assert.Throws` does not work with the reader, because a lambda cannot capture a ref local.
+
+**Assert each new reader feature over a span, a sequence with one segment, `Chunked(1)`, and `WithEmptySegments`.** `BsonGeneratorTests` already deserializes each value two times, one time from one piece and one time through `Chunked(3)`.
 
 When you change the wire format, add a byte-level assertion. A round-trip test is not sufficient. A reader bug and a writer bug that agree can still give a correct round trip. The same rule applies to lengths: only a count of bytes finds a wrong one.
 
@@ -241,3 +268,5 @@ This repository has no CI system and no automatic version numbers. Thus you must
 3. Pack both packages in Release.
 4. Examine both `.nupkg` files. Test them from new consumer projects.
 5. Publish the packages with the usual NuGet release process.
+
+For a release that changes the public API, also update the migration section in [README.md](README.md) and give the release a new major version.

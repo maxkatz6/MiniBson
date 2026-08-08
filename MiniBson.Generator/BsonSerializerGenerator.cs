@@ -290,9 +290,8 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
     private const string SizeTableParameter = "__sizes";
 
     /// <summary>
-    /// The length for the start of a document. It is zero when the destination can seek. The
-    /// writer reads zero as an unknown length and writes the length later, which is faster than
-    /// a measurement.
+    /// The length for the start of a document. The measure pass recorded the lengths in the order
+    /// that the write pass asks for them here.
     /// </summary>
     private const string SizedFraming = SizeTableParameter + ".Next()";
 
@@ -466,12 +465,11 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         sb.AppendLine($"    private void Write{methodName}(BsonWriter writer, {typeName} instance)");
         sb.AppendLine("    {");
         sb.AppendLine("        // One measuring walk for the whole graph, replayed below in the order the writer");
-        sb.AppendLine("        // asks for lengths. Skipped entirely when the writer can patch them in later.");
-        sb.AppendLine($"        var {SizeTableParameter} = {SizeTableType}.Rent(writer.RequiresKnownLength);");
+        sb.AppendLine("        // asks for lengths. Every document needs its length before it starts.");
+        sb.AppendLine($"        var {SizeTableParameter} = {SizeTableType}.Rent();");
         sb.AppendLine("        try");
         sb.AppendLine("        {");
-        sb.AppendLine($"            if ({SizeTableParameter}.IsActive)");
-        sb.AppendLine($"                Measure{methodName}(instance, {SizeTableParameter});");
+        sb.AppendLine($"            Measure{methodName}(instance, {SizeTableParameter});");
         sb.AppendLine();
         sb.AppendLine($"            writer.WriteStartDocument({SizedFraming});");
         sb.AppendLine($"            Write{methodName}Inner(writer, instance, {SizeTableParameter});");
@@ -859,18 +857,20 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         var typeName = type.FullyQualifiedName;
         var methodName = GetSafeMethodName(type);
 
-        sb.AppendLine($"    private {typeName}? Read{methodName}(BsonReader reader)");
+        // BsonReader is a ref struct. It goes by reference, because a copy would read the same
+        // bytes a second time from the position that this method received.
+        sb.AppendLine($"    private {typeName}? Read{methodName}(ref BsonReader reader)");
         sb.AppendLine("    {");
         sb.AppendLine("#nullable disable");
         sb.AppendLine("        reader.ReadStartDocument();");
-        sb.AppendLine($"        var result = Read{methodName}Inner(reader);");
+        sb.AppendLine($"        var result = Read{methodName}Inner(ref reader);");
         sb.AppendLine("        reader.ReadEndDocument();");
         sb.AppendLine("        return result;");
         sb.AppendLine("#nullable restore");
         sb.AppendLine("    }");
         sb.AppendLine();
 
-        sb.AppendLine($"    private {typeName} Read{methodName}Inner(BsonReader reader)");
+        sb.AppendLine($"    private {typeName} Read{methodName}Inner(ref BsonReader reader)");
         sb.AppendLine("    {");
         sb.AppendLine("#nullable disable");
 
@@ -976,11 +976,11 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         switch (mapping.Kind)
         {
             case BsonMapping.Binary:
-                sb.AppendLine($"{indent}    _{name} = reader.ReadBinary().Data;");
+                sb.AppendLine($"{indent}    _{name} = reader.ReadBinaryArray(out _);");
                 return;
 
             case BsonMapping.BinaryMemory:
-                sb.AppendLine($"{indent}    _{name} = reader.ReadBinaryAsMemory().Data;");
+                sb.AppendLine($"{indent}    _{name} = reader.ReadBinaryMemory(out _);");
                 return;
 
             case BsonMapping.Array:
@@ -1041,7 +1041,7 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
                 var methodName = GetSafeMethodName(mapping.NestedType!);
                 sb.AppendLine($"{indent}{{");
                 sb.AppendLine($"{indent}    reader.ReadStartNestedDocument();");
-                sb.AppendLine($"{indent}    list.Add(Read{methodName}Inner(reader));");
+                sb.AppendLine($"{indent}    list.Add(Read{methodName}Inner(ref reader));");
                 sb.AppendLine($"{indent}    reader.ReadEndDocument();");
                 sb.AppendLine($"{indent}}}");
                 return;
@@ -1068,7 +1068,7 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
                 var methodName = GetSafeMethodName(mapping.NestedType!);
                 sb.AppendLine($"{indent}{{");
                 sb.AppendLine($"{indent}    reader.ReadStartNestedDocument();");
-                sb.AppendLine($"{indent}    _{name} = Read{methodName}Inner(reader);");
+                sb.AppendLine($"{indent}    _{name} = Read{methodName}Inner(ref reader);");
                 sb.AppendLine($"{indent}    reader.ReadEndDocument();");
                 sb.AppendLine($"{indent}}}");
                 return;
@@ -1106,8 +1106,8 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         sb.AppendLine("    /// </summary>");
         sb.AppendLine("    /// <remarks>");
         sb.AppendLine("    /// The number is exact and not an estimate, but only if each property returns the same");
-        sb.AppendLine("    /// value two times. It is the same length that the writer computes when the destination");
-        sb.AppendLine("    /// cannot seek.");
+        sb.AppendLine("    /// value two times. It is the same length that <see cref=\"Serialize\"/> computes, so it");
+        sb.AppendLine("    /// also sizes a destination buffer exactly.");
         sb.AppendLine("    /// </remarks>");
         sb.AppendLine("    public int GetSerializedSize(object input)");
         sb.AppendLine("    {");
@@ -1151,16 +1151,15 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
         sb.AppendLine("    /// <summary>");
         sb.AppendLine("    /// Deserializes BSON data to an object of the given type.");
         sb.AppendLine("    /// </summary>");
-        sb.AppendLine("    public object? Deserialize(BsonReader reader, Type type)");
+        sb.AppendLine("    public object? Deserialize(ref BsonReader reader, Type type)");
         sb.AppendLine("    {");
-        sb.AppendLine("        if (reader is null) throw new ArgumentNullException(nameof(reader));");
         sb.AppendLine("        if (type is null) throw new ArgumentNullException(nameof(type));");
 
         EmitTypeDispatch(
             sb,
             types,
             "type",
-            type => $"return Read{GetSafeMethodName(type)}(reader);",
+            type => $"return Read{GetSafeMethodName(type)}(ref reader);",
             "deserialization");
 
         sb.AppendLine("    }");

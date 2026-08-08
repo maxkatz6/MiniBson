@@ -6,10 +6,14 @@ MiniBson is a small BSON library for .NET. It has a forward-only reader, a forwa
 
 - Source-generated serialization for your models
 - Low-level `BsonReader` and `BsonWriter` APIs
+- Writes to any `IBufferWriter<byte>`, and reads from a `ReadOnlySpan<byte>`, a `ReadOnlyMemory<byte>`, or a `ReadOnlySequence<byte>`
+- No `Stream` anywhere in the API, so a `PipeWriter` or a `PipeReader` needs no adapter
 - No reflection at run time
 - `netstandard2.0` and `net8.0` targets
 - No dependency on `net8.0`, and only `System.Memory` on `netstandard2.0`
 - An assembly NuGet package and a source-only NuGet package
+
+Coming from version 1.x? See [Migrating from 1.x](#migrating-from-1x).
 
 ## Installation
 
@@ -49,7 +53,7 @@ public partial class AppBsonContext
 }
 ```
 
-The context uses a `BsonReader` or a `BsonWriter`. You keep the ownership of the streams and the buffers:
+The context uses a `BsonReader` or a `BsonWriter`. You keep the ownership of the buffers:
 
 ```csharp
 var context = new AppBsonContext();
@@ -60,28 +64,24 @@ var original = new Person
     Tags = ["compiler", "math"]
 };
 
-byte[] bson;
-using (var stream = new MemoryStream())
-{
-    using (var writer = new BsonWriter(stream, leaveOpen: true))
-    {
-        context.Serialize(original, writer);
-    }
+using var output = new BsonBufferWriter(context.GetSerializedSize(original));
+context.Serialize(original, new BsonWriter(output));
 
-    bson = stream.ToArray();
-}
-
-using var reader = new BsonReader(bson);
-var copy = (Person?)context.Deserialize(reader, typeof(Person));
+var reader = new BsonReader(output.WrittenSpan);
+var copy = (Person?)context.Deserialize(ref reader, typeof(Person));
 ```
+
+`BsonBufferWriter` is the destination that MiniBson supplies. Any `IBufferWriter<byte>` works, including `ArrayBufferWriter<byte>` and `PipeWriter`.
 
 Each context has these methods:
 
 ```csharp
 void Serialize(object input, BsonWriter writer);
-object? Deserialize(BsonReader reader, Type type);
+object? Deserialize(ref BsonReader reader, Type type);
 int GetSerializedSize(object input);
 ```
+
+`Deserialize` takes the reader by reference, because `BsonReader` is a ref struct. A copy would read the same bytes a second time.
 
 `GetSerializedSize` returns the number of bytes that `Serialize` writes, but it writes no bytes itself. Use it for these tasks:
 
@@ -94,12 +94,13 @@ var size = context.GetSerializedSize(person);
 if (size > MaxMessageBytes)
     throw new InvalidOperationException($"{size} bytes exceeds the limit.");
 
-WriteFrameHeader(socket, size);
-using var writer = new BsonWriter(socket, leaveOpen: true);
-context.Serialize(person, writer);
+WriteFrameHeader(pipe, size);
+context.Serialize(person, new BsonWriter(pipe));
 ```
 
-The number is exact. It is not an estimate. It is the same number that the writer computes when the destination cannot seek, and the writer throws an exception if the two numbers disagree. This is true only if each property returns the same value two times. See [Streams that cannot seek](#streams-that-cannot-seek).
+The number is exact. It is not an estimate. It is the same number that `Serialize` computes for itself, and the writer throws an exception if the two numbers disagree. This is true only if each property returns the same value two times. See [Document lengths](#document-lengths).
+
+Give the number to `BsonBufferWriter`. It then rents one buffer, does not grow, and makes no copy.
 
 ### Model behavior
 
@@ -110,20 +111,18 @@ The number is exact. It is not an estimate. It is the same number that the write
 - MiniBson writes an enum as a number. A new name for a member is safe, but a new number for a member changes the wire format.
 - MiniBson writes a null reference as BSON Null and reads it back as null. The nullable annotation on the property does not change the wire format.
 
-### Streams that cannot seek
+### Document lengths
 
-A context can serialize and deserialize over all streams. This includes a stream that cannot seek.
+A BSON document starts with its total length, and an `IBufferWriter<byte>` does not return a byte that it gave out. Thus the generated code computes the length of each document before it starts that document. This is the same for every destination.
 
-If the destination cannot seek, the generated code computes the length of each document first. Thus it writes no length later. If the destination can seek, the code does not do that work. `BsonWriter` writes each length later instead, which is faster. A deserializer needs no equivalent test, because `BsonReader` never does a seek backwards.
-
-This behavior has no cost, but it adds one rule for your models: **a property must return the same value two times**. The measure pass and the write pass read the object graph separately. If a property gives a different value to each pass, the computed length is wrong. These properties are examples:
+This costs one more walk of your object graph, and it adds one rule for your models: **a property must return the same value two times**. The measure pass and the write pass read the object graph separately. If a property gives a different value to each pass, the computed length is wrong. These properties are examples:
 
 - A computed property that returns a new array each time.
 - A property on an object that a different thread changes at the same time.
 
-`WriteEndDocument()` finds the disagreement and throws an `InvalidOperationException`. It writes no bad document.
+`WriteEndDocument()` finds the disagreement and throws an `InvalidOperationException`. It writes no bad document. This test runs on every write. Thus there is no destination where such a property passes without an error.
 
-This test runs only when the destination cannot seek. Thus such a property can pass with a `MemoryStream` and fail with a socket. If your models have computed properties, test both destinations.
+When the test throws, the destination can already hold some bytes. Discard them. Do not use them. `BsonBufferWriter.Clear()` does this.
 
 ### Supported model types
 
@@ -166,31 +165,42 @@ Use the low-level API if you need direct control of the BSON document. Use it al
 
 ### Write a document
 
+Each document needs its length first. `BsonSize` computes it:
+
 ```csharp
-using var stream = new MemoryStream();
+var tagsLength = BsonSize.ArrayOverhead(2)
+    + BsonSize.String("compiler") + BsonSize.String("math");
 
-using (var writer = new BsonWriter(stream, leaveOpen: true))
-{
-    writer.WriteStartDocument();
-    writer.WriteString("name", "Ada");
-    writer.WriteInt32("age", 37);
-    writer.WriteBoolean("active", true);
+var length = BsonSize.DocumentOverhead
+    + BsonSize.Element("name") + BsonSize.String("Ada")
+    + BsonSize.Element("age") + BsonSize.Int32
+    + BsonSize.Element("active") + BsonSize.Boolean
+    + BsonSize.Element("tags") + tagsLength;
 
-    writer.WriteStartArray("tags");
-    writer.WriteString("compiler");
-    writer.WriteString("math");
-    writer.WriteEndArray();
+using var output = new BsonBufferWriter(length);
+var writer = new BsonWriter(output);
 
-    writer.WriteEndDocument();
-}
+writer.WriteStartDocument(length);
+writer.WriteString("name", "Ada");
+writer.WriteInt32("age", 37);
+writer.WriteBoolean("active", true);
 
-byte[] bson = stream.ToArray();
+writer.WriteStartArray("tags", tagsLength);
+writer.WriteString("compiler");
+writer.WriteString("math");
+writer.WriteEndArray();
+
+writer.WriteEndDocument();
+
+byte[] bson = output.ToArray();
 ```
+
+To avoid this arithmetic, use the source generator. See [Source-generated serialization](#source-generated-serialization).
 
 ### Read a document
 
 ```csharp
-using var reader = new BsonReader(bson);
+var reader = new BsonReader(bson);
 reader.ReadStartDocument();
 
 while (reader.Read())
@@ -222,6 +232,19 @@ reader.ReadEndDocument();
 
 `ReadEndDocument()` closes the current document or the current array.
 
+The reader takes its input in four forms:
+
+```csharp
+var reader = new BsonReader(bson);                  // byte[]
+var reader = new BsonReader(memory);                // ReadOnlyMemory<byte>
+var reader = new BsonReader(span);                  // ReadOnlySpan<byte>
+var reader = new BsonReader(sequence);              // ReadOnlySequence<byte>, e.g. from a PipeReader
+```
+
+The full document must be in memory. With a `PipeReader`, read the four-byte length first, wait for that number of bytes, and give the reader that slice. `BytesConsumed` gives the end of the document, so you can slice at that point and read the next one.
+
+`BsonReader` is a `ref struct`, the same as `Utf8JsonReader`. It cannot cross an `await`, a lambda cannot capture it, and a class cannot hold it in a field. Pass it as `ref BsonReader`.
+
 ### Supported BSON values
 
 | BSON value | Write API | Read API |
@@ -230,7 +253,7 @@ reader.ReadEndDocument();
 | String | `WriteString` | `ReadString` |
 | Document | `WriteStartDocument`, `WriteEndDocument` | `ReadStartDocument`, `ReadStartNestedDocument`, `ReadEndDocument` |
 | Array | `WriteStartArray`, `WriteEndArray` | `ReadStartArray`, `ReadEndArray` |
-| Binary | `WriteBinary` | `ReadBinary`, `ReadBinaryAsMemory` |
+| Binary | `WriteBinary` | `ReadBinary`, `ReadBinaryArray`, `ReadBinaryMemory` |
 | ObjectId | `WriteObjectId` | `ReadObjectId` |
 | Boolean | `WriteBoolean` | `ReadBoolean` |
 | DateTime | `WriteDateTime` | `ReadDateTime` |
@@ -246,48 +269,64 @@ An array is a document on the wire. Thus `ReadEndArray` and `ReadEndDocument` ar
 
 `Skip()` also accepts each deprecated type in the specification: `Undefined`, `DBPointer`, `Symbol`, `JavaScriptWithScope`, `Decimal128`, `MinKey`, and `MaxKey`. This is true even when there is no accessor for the value. Generated deserializers skip each element that they do not know. Thus a document with one of these types stays readable.
 
-A reader from a `byte[]` or a `ReadOnlyMemory<byte>` uses your memory directly. On that path, `ReadBinaryAsMemory()` returns a slice of your input and makes no copy. If you need a separate copy, use `ReadBinary()`.
+`ReadBinary()` returns a `ReadOnlySpan<byte>` that points into your input. `ReadBinaryMemory()` returns a `ReadOnlyMemory<byte>` slice of it. Neither makes a copy, except in two cases. A reader from a plain `ReadOnlySpan<byte>` has no memory behind it to slice, so `ReadBinaryMemory` copies there. A value that lies across two segments of a sequence also goes into a new array. `ReadBinaryArray()` always copies. Use it when the value must live longer than the input.
 
-### Streams and document lengths
+### Document lengths and `BsonSize`
 
-A BSON document starts with its total length. The writer does not know that length until the document is complete. `BsonWriter` has two solutions:
-
-| Destination | How to start a document | Cost |
-| --- | --- | --- |
-| A stream that can seek | `WriteStartDocument()` | The writer writes a placeholder, then `WriteEndDocument()` writes the correct length |
-| Any stream | `WriteStartDocument(length)` | You supply the length, and the writer does not go back |
-
-Only the second form works with a stream that cannot seek, such as a network stream or a pipe stream. If you start a document there without a length, the writer throws an `InvalidOperationException`. `WriteStartDocument(string, int)`, `WriteStartArray(string, int)`, `WriteStartNestedDocument(int)`, and `WriteStartNestedArray(int)` accept a length in the same manner.
-
-The length is the length of the complete document. It includes the four-byte prefix and the null byte at the end. `BsonSize` gives you the parts:
+A BSON document starts with its total length. An `IBufferWriter<byte>` does not return a byte that it gave out, so the writer cannot write that length later. Thus each document needs its length at the start:
 
 ```csharp
-var length = BsonSize.DocumentOverhead
-    + BsonSize.Element("name") + BsonSize.String("Ada")
-    + BsonSize.Element("age") + BsonSize.Int32;
-
-using var writer = new BsonWriter(networkStream, leaveOpen: true);
 writer.WriteStartDocument(length);
-writer.WriteString("name", "Ada");
-writer.WriteInt32("age", 37);
-writer.WriteEndDocument();
 ```
 
-If your length does not agree with the bytes that the writer wrote, `WriteEndDocument()` throws an exception. It writes no bad document. `RequiresKnownLength` tells you if the destination needs a length from you.
+`WriteStartDocument(string, int)`, `WriteStartArray(string, int)`, `WriteStartNestedDocument(int)`, and `WriteStartNestedArray(int)` take a length in the same manner.
 
-A generated serializer does all of this for you. See [Streams that cannot seek](#streams-that-cannot-seek).
+The length is the length of the complete document. It includes the four-byte prefix and the null byte at the end. `BsonSize` gives you the parts. Each helper there agrees with one writer method.
 
-`BsonReader` works with all streams. It keeps its own position and does not ask the stream. If the stream cannot seek, a skip reads those bytes and discards them. A reader consumes its own document and no more bytes. Thus you can read a stream that holds a sequence of documents one document at a time.
+If your length does not agree with the bytes that the writer wrote, `WriteEndDocument()` throws an `InvalidOperationException`. It writes no bad document.
 
-### Buffers
+A generated serializer computes all of this for you. See [Document lengths](#document-lengths).
 
-`BsonWriter` keeps bytes in a buffer of a fixed length. It does not write each value directly to the stream. The buffer length does not increase with the document length, and a value that is longer than the buffer goes directly to the stream.
+### Output and buffering
 
-`WriteEndDocument()` on the top-level document drains the buffer. Thus a complete document is always on the destination. If you read a `MemoryStream` after that call, you get the full document. The writer holds back only an open document, and `Flush()` writes that to the destination.
+`BsonWriter` holds a buffer from the destination and commits it with `Advance`. Two rules follow:
 
-`Flush()` also flushes the stream, and `Dispose` does the same. This is important when the destination has its own buffer. A `BufferedStream`, a `GZipStream`, and a `FileStream` that you keep open are examples.
+- **Do not write to the same `IBufferWriter<byte>` yourself while a document is open.** The writer holds a buffer from it.
+- `WriteEndDocument()` on the top-level document commits each byte. Thus the destination always holds a complete document, and you need no call of your own. Use `Flush()` for a document that you do not finish.
 
-`BsonReader` also reads ahead into a window. It never reads past the end of its current document. Thus a stream that holds a sequence of documents stays readable one document at a time.
+The writer asks the destination for adjacent bytes only for a scalar or the digits of an array index. That is twelve bytes at the most. A longer value fills a buffer, commits it, and takes another one. A destination that gives one byte at a time works.
+
+`BsonBufferWriter` is a pooled destination that can grow. Construct it with the number from `GetSerializedSize`, and it rents one time and does not grow. Its members are `WrittenSpan`, `WrittenMemory`, `Clear()`, and `Dispose()`. A later write makes a span or memory from an earlier call invalid.
+
+## Migrating from 1.x
+
+Version 2.0 removed `Stream` from the API. The wire format did not change, so documents from 1.x read back unchanged.
+
+| 1.x | 2.0 |
+| --- | --- |
+| `new BsonWriter(stream, leaveOpen)` | `new BsonWriter(bufferWriter)` |
+| `new BsonReader(stream, leaveOpen)` | Read the bytes first, then `new BsonReader(bytes)` |
+| `writer.WriteStartDocument()` | `writer.WriteStartDocument(length)` — compute it with `BsonSize` |
+| `writer.RequiresKnownLength` | Removed. A length is always required. |
+| `writer.Dispose()` | Removed. `WriteEndDocument()` commits; `Flush()` commits a partial document. |
+| `reader.Dispose()` | Removed. The reader owns nothing. |
+| `context.Deserialize(reader, type)` | `context.Deserialize(ref reader, type)` |
+| `reader.ReadBinary()` returning a tuple | `reader.ReadBinary(out var subType)` returning a span, or `ReadBinaryArray(out var subType)` |
+| `reader.ReadBinaryAsMemory()` | `reader.ReadBinaryMemory(out var subType)` |
+| `reader.ReadObjectId()` returning `byte[]` | Returns a `ReadOnlySpan<byte>`. Call `.ToArray()` for the old behavior. |
+| `EndOfStreamException` on truncated input | `InvalidDataException` |
+
+To bridge a `Stream` on the write side, write into a `BsonBufferWriter` and copy:
+
+```csharp
+using var output = new BsonBufferWriter(context.GetSerializedSize(value));
+context.Serialize(value, new BsonWriter(output));
+stream.Write(output.WrittenSpan);
+```
+
+On the read side, read the stream into a `byte[]` first. `BsonReader` needs the full document in memory, so it does not decode a document in parts. With a `PipeReader`, read the four-byte length, wait for that number of bytes, and pass that slice.
+
+`BsonReader` is now a ref struct. Thus code that held one in a field, or used one across an `await`, needs a new shape. Read the bytes with async code, and then deserialize with sync code.
 
 ## How to contribute
 

@@ -6,15 +6,7 @@ public class MetsysCrossTests
 {
     private static readonly DateTime Epoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
 
-    private byte[] Serialize(Action<BsonWriter> action)
-    {
-        using var ms = new MemoryStream();
-        using var writer = new BsonWriter(ms);
-        writer.WriteStartDocument();
-        action(writer);
-        writer.WriteEndDocument();
-        return ms.ToArray();
-    }
+    private byte[] Serialize(Action<BsonWriter> action) => BsonTestWriter.Serialize(action);
 
     [TestMethod]
     public void SerializesAProperty()
@@ -139,10 +131,11 @@ public class MetsysCrossTests
     {
         var result = Serialize(w =>
         {
-            w.WriteStartArray("Name");
-            w.WriteInt32(4);
-            w.WriteString("a");
-            w.WriteEndArray();
+            w.Array("Name", a =>
+            {
+                a.WriteInt32(4);
+                a.WriteString("a");
+            });
         });
 
         Assert.AreEqual(32, BitConverter.ToInt32(result, 0)); //length
@@ -167,11 +160,12 @@ public class MetsysCrossTests
     {
         var result = Serialize(w =>
         {
-            w.WriteStartArray("Name");
-            w.WriteInt32(3);
-            w.WriteInt32(2);
-            w.WriteInt32(1);
-            w.WriteEndArray();
+            w.Array("Name", a =>
+            {
+                a.WriteInt32(3);
+                a.WriteInt32(2);
+                a.WriteInt32(1);
+            });
         });
 
         Assert.AreEqual(37, BitConverter.ToInt32(result, 0)); //length
@@ -198,11 +192,12 @@ public class MetsysCrossTests
     {
         var result = Serialize(w =>
         {
-            w.WriteStartArray("Name");
-            w.WriteInt32(3);
-            w.WriteInt32(2);
-            w.WriteInt32(1);
-            w.WriteEndArray();
+            w.Array("Name", a =>
+            {
+                a.WriteInt32(3);
+                a.WriteInt32(2);
+                a.WriteInt32(1);
+            });
         });
         Assert.AreEqual(37, BitConverter.ToInt32(result, 0)); //length
         Assert.AreEqual(4, result[4]); //type
@@ -291,10 +286,11 @@ public class MetsysCrossTests
     {
         var result = Serialize(w =>
         {
-            w.WriteStartDocument("Name");
-            w.WriteInt32("first", 1);
-            w.WriteString("secOnd", "tWo");
-            w.WriteEndDocument();
+            w.Document("Name", d =>
+            {
+                d.WriteInt32("first", 1);
+                d.WriteString("secOnd", "tWo");
+            });
         });
 
         Assert.AreEqual(43, BitConverter.ToInt32(result, 0)); //length

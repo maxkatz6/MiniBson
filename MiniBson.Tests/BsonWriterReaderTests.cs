@@ -9,20 +9,14 @@ public sealed class BsonWriterReaderTests
     [TestMethod]
     public void WriteAndReadSimpleDocument()
     {
-        // Write
-        using var ms = new MemoryStream();
-        using (var writer = new BsonWriter(ms, leaveOpen: true))
+        var document = BsonTestWriter.Serialize(writer =>
         {
-            writer.WriteStartDocument();
             writer.WriteString("name", "test");
             writer.WriteInt32("value", 42);
             writer.WriteBoolean("flag", true);
-            writer.WriteEndDocument();
-        }
+        });
 
-        // Read
-        ms.Position = 0;
-        using var reader = new BsonReader(ms);
+        var reader = new BsonReader(document);
         reader.ReadStartDocument();
 
         Assert.IsTrue(reader.Read());
@@ -47,20 +41,17 @@ public sealed class BsonWriterReaderTests
     [TestMethod]
     public void WriteAndReadArray()
     {
-        using var ms = new MemoryStream();
-        using (var writer = new BsonWriter(ms, leaveOpen: true))
+        var document = BsonTestWriter.Serialize(writer =>
         {
-            writer.WriteStartDocument();
-            writer.WriteStartArray("items");
-            writer.WriteInt32(1);
-            writer.WriteInt32(2);
-            writer.WriteInt32(3);
-            writer.WriteEndArray();
-            writer.WriteEndDocument();
-        }
+            writer.Array("items", a =>
+            {
+                a.WriteInt32(1);
+                a.WriteInt32(2);
+                a.WriteInt32(3);
+            });
+        });
 
-        ms.Position = 0;
-        using var reader = new BsonReader(ms);
+        var reader = new BsonReader(document);
         reader.ReadStartDocument();
 
         Assert.IsTrue(reader.Read());
@@ -86,25 +77,20 @@ public sealed class BsonWriterReaderTests
     }
 
     /// <summary>
-    /// An array is a document on the wire, so you can use either method to close one. There are
-    /// two names, so the read code can agree with the write code that made the bytes.
+    /// The reader ends an array and a document with the same operation. The API gives it two
+    /// names, so the read code can agree with the write code that made the bytes.
     /// </summary>
     [TestMethod]
     public void ReadEndArrayAndReadEndDocumentAreInterchangeable()
     {
-        using var ms = new MemoryStream();
-        using (var writer = new BsonWriter(ms, leaveOpen: true))
+        var document = BsonTestWriter.Serialize(writer =>
         {
-            writer.WriteStartDocument();
-            writer.WriteStartArray("items");
-            writer.WriteInt32(1);
-            writer.WriteEndArray();
-            writer.WriteEndDocument();
-        }
+            writer.Array("items", a => a.WriteInt32(1));
+        });
 
         static int ReadWith(byte[] document, Action<BsonReader> endArray)
         {
-            using var reader = new BsonReader(document);
+            var reader = new BsonReader(document);
             reader.ReadStartDocument();
             Assert.IsTrue(reader.Read());
             reader.ReadStartArray();
@@ -117,7 +103,6 @@ public sealed class BsonWriterReaderTests
             return value;
         }
 
-        var document = ms.ToArray();
         Assert.AreEqual(1, ReadWith(document, r => r.ReadEndArray()));
         Assert.AreEqual(1, ReadWith(document, r => r.ReadEndDocument()));
     }
@@ -125,18 +110,12 @@ public sealed class BsonWriterReaderTests
     [TestMethod]
     public void WriteAndReadNestedDocument()
     {
-        using var ms = new MemoryStream();
-        using (var writer = new BsonWriter(ms, leaveOpen: true))
+        var document = BsonTestWriter.Serialize(writer =>
         {
-            writer.WriteStartDocument();
-            writer.WriteStartDocument("nested");
-            writer.WriteString("inner", "value");
-            writer.WriteEndDocument();
-            writer.WriteEndDocument();
-        }
+            writer.Document("nested", d => d.WriteString("inner", "value"));
+        });
 
-        ms.Position = 0;
-        using var reader = new BsonReader(ms);
+        var reader = new BsonReader(document);
         reader.ReadStartDocument();
 
         Assert.IsTrue(reader.Read());
@@ -163,10 +142,8 @@ public sealed class BsonWriterReaderTests
         var testGuid = Guid.NewGuid();
         var testBinary = new byte[] { 1, 2, 3, 4, 5 };
 
-        using var ms = new MemoryStream();
-        using (var writer = new BsonWriter(ms, leaveOpen: true))
+        var document = BsonTestWriter.Serialize(writer =>
         {
-            writer.WriteStartDocument();
             writer.WriteString("str", "hello");
             writer.WriteInt32("i32", -123);
             writer.WriteInt64("i64", 9876543210L);
@@ -176,11 +153,9 @@ public sealed class BsonWriterReaderTests
             writer.WriteDateTime("date", testDate);
             writer.WriteGuid("guid", testGuid);
             writer.WriteBinary("bin", testBinary);
-            writer.WriteEndDocument();
-        }
+        });
 
-        ms.Position = 0;
-        using var reader = new BsonReader(ms);
+        var reader = new BsonReader(document);
         reader.ReadStartDocument();
 
         Assert.IsTrue(reader.Read());
@@ -208,66 +183,54 @@ public sealed class BsonWriterReaderTests
         Assert.AreEqual(testGuid, reader.ReadGuid());
 
         Assert.IsTrue(reader.Read());
-        var (data, subType) = reader.ReadBinary();
+        var data = reader.ReadBinaryArray(out _);
         CollectionAssert.AreEqual(testBinary, data);
 
         Assert.IsFalse(reader.Read());
         reader.ReadEndDocument();
     }
 
+    /// <summary>
+    /// A reader over caller memory gives back a slice of it and copies nothing.
+    /// </summary>
     [TestMethod]
-    public void ReadBinaryAsMemory_FromByteArray_SlicesIntoSource()
+    public void ReadBinaryMemoryFromAByteArraySlicesIntoTheSource()
     {
         var testBinary = new byte[] { 0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE };
-        byte[] bsonData;
+        var document = BsonTestWriter.Serialize(writer => writer.WriteBinary("bin", testBinary));
 
-        using (var ms = new MemoryStream())
-        {
-            using var writer = new BsonWriter(ms);
-            writer.WriteStartDocument();
-            writer.WriteBinary("bin", testBinary);
-            writer.WriteEndDocument();
-            bsonData = ms.ToArray();
-        }
-
-        using var reader = new BsonReader(bsonData);
+        var reader = new BsonReader(document);
         reader.ReadStartDocument();
         Assert.IsTrue(reader.Read());
 
-        var (data, _) = reader.ReadBinaryAsMemory();
+        var data = reader.ReadBinaryMemory(out _);
 
         CollectionAssert.AreEqual(testBinary, data.ToArray());
         Assert.IsTrue(MemoryMarshal.TryGetArray(data, out var segment));
-        Assert.AreSame(bsonData, segment.Array, "Binary memory should alias the source byte[] (zero-copy).");
+        Assert.AreSame(document, segment.Array, "Binary memory should alias the source byte[] (zero-copy).");
 
         reader.ReadEndDocument();
     }
 
+    /// <summary>
+    /// The window is the caller's slice and not the whole array, so the offset has to survive.
+    /// </summary>
     [TestMethod]
-    public void ReadBinaryAsMemory_FromReadOnlyMemory_SlicesIntoSource()
+    public void ReadBinaryMemoryFromReadOnlyMemorySlicesIntoTheSource()
     {
         var testBinary = new byte[] { 1, 2, 3, 4, 5 };
-        byte[] bsonData;
-
-        using (var ms = new MemoryStream())
-        {
-            using var writer = new BsonWriter(ms);
-            writer.WriteStartDocument();
-            writer.WriteBinary("bin", testBinary);
-            writer.WriteEndDocument();
-            bsonData = ms.ToArray();
-        }
+        var document = BsonTestWriter.Serialize(writer => writer.WriteBinary("bin", testBinary));
 
         // Wrap with an offset to verify the offset is respected.
-        var padded = new byte[bsonData.Length + 8];
-        Buffer.BlockCopy(bsonData, 0, padded, 4, bsonData.Length);
-        var input = new ReadOnlyMemory<byte>(padded, 4, bsonData.Length);
+        var padded = new byte[document.Length + 8];
+        Buffer.BlockCopy(document, 0, padded, 4, document.Length);
+        var input = new ReadOnlyMemory<byte>(padded, 4, document.Length);
 
-        using var reader = new BsonReader(input);
+        var reader = new BsonReader(input);
         reader.ReadStartDocument();
         Assert.IsTrue(reader.Read());
 
-        var (data, _) = reader.ReadBinaryAsMemory();
+        var data = reader.ReadBinaryMemory(out _);
 
         CollectionAssert.AreEqual(testBinary, data.ToArray());
         Assert.IsTrue(MemoryMarshal.TryGetArray(data, out var segment));
@@ -277,25 +240,20 @@ public sealed class BsonWriterReaderTests
     }
 
     [TestMethod]
-    public void ReadBinaryAsMemory_FromStream_AllocatesCopy()
+    public void ReadBinaryAlwaysCopies()
     {
-        var testBinary = new byte[] { 0x11, 0x22, 0x33 };
+        var testBinary = new byte[] { 9, 8, 7 };
+        var document = BsonTestWriter.Serialize(writer => writer.WriteBinary("bin", testBinary));
 
-        using var ms = new MemoryStream();
-        using (var writer = new BsonWriter(ms, leaveOpen: true))
-        {
-            writer.WriteStartDocument();
-            writer.WriteBinary("bin", testBinary);
-            writer.WriteEndDocument();
-        }
-
-        ms.Position = 0;
-        using var reader = new BsonReader(ms);
+        var reader = new BsonReader(document);
         reader.ReadStartDocument();
         Assert.IsTrue(reader.Read());
 
-        var (data, _) = reader.ReadBinaryAsMemory();
-        CollectionAssert.AreEqual(testBinary, data.ToArray());
+        var data = reader.ReadBinaryArray(out var subType);
+
+        CollectionAssert.AreEqual(testBinary, data);
+        Assert.AreEqual(BsonBinarySubType.Generic, subType);
+        Assert.AreNotSame(document, data);
 
         reader.ReadEndDocument();
     }
@@ -303,18 +261,9 @@ public sealed class BsonWriterReaderTests
     [TestMethod]
     public void WriteAndReadFromByteArray()
     {
-        byte[] bsonData;
+        var document = BsonTestWriter.Serialize(writer => writer.WriteString("key", "value"));
 
-        using (var ms = new MemoryStream())
-        {
-            using var writer = new BsonWriter(ms);
-            writer.WriteStartDocument();
-            writer.WriteString("key", "value");
-            writer.WriteEndDocument();
-            bsonData = ms.ToArray();
-        }
-
-        using var reader = new BsonReader(bsonData);
+        var reader = new BsonReader(document);
         reader.ReadStartDocument();
 
         Assert.IsTrue(reader.Read());
@@ -328,17 +277,13 @@ public sealed class BsonWriterReaderTests
     [TestMethod]
     public void SkipElement()
     {
-        using var ms = new MemoryStream();
-        using (var writer = new BsonWriter(ms, leaveOpen: true))
+        var document = BsonTestWriter.Serialize(writer =>
         {
-            writer.WriteStartDocument();
             writer.WriteString("first", "skip me");
             writer.WriteInt32("second", 42);
-            writer.WriteEndDocument();
-        }
+        });
 
-        ms.Position = 0;
-        using var reader = new BsonReader(ms);
+        var reader = new BsonReader(document);
         reader.ReadStartDocument();
 
         Assert.IsTrue(reader.Read());
@@ -356,17 +301,13 @@ public sealed class BsonWriterReaderTests
     [TestMethod]
     public void ReadValueAsDynamic()
     {
-        using var ms = new MemoryStream();
-        using (var writer = new BsonWriter(ms, leaveOpen: true))
+        var document = BsonTestWriter.Serialize(writer =>
         {
-            writer.WriteStartDocument();
             writer.WriteString("str", "hello");
             writer.WriteInt32("num", 42);
-            writer.WriteEndDocument();
-        }
+        });
 
-        ms.Position = 0;
-        using var reader = new BsonReader(ms);
+        var reader = new BsonReader(document);
         reader.ReadStartDocument();
 
         Assert.IsTrue(reader.Read());
@@ -381,16 +322,9 @@ public sealed class BsonWriterReaderTests
     [TestMethod]
     public void WriteRegex()
     {
-        using var ms = new MemoryStream();
-        using (var writer = new BsonWriter(ms, leaveOpen: true))
-        {
-            writer.WriteStartDocument();
-            writer.WriteRegex("pattern", "^test.*$", "im");
-            writer.WriteEndDocument();
-        }
+        var document = BsonTestWriter.Serialize(writer => writer.WriteRegex("pattern", "^test.*$", "im"));
 
-        ms.Position = 0;
-        using var reader = new BsonReader(ms);
+        var reader = new BsonReader(document);
         reader.ReadStartDocument();
 
         Assert.IsTrue(reader.Read());

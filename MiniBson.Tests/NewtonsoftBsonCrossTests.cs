@@ -8,6 +8,13 @@ namespace MiniBson.Tests;
 public sealed class NewtonsoftBsonCrossTests
 {
     /// <summary>
+    /// Wraps bytes for Newtonsoft. <c>BsonDataReader</c> and <c>BsonDataWriter</c> accept only a
+    /// <see cref="Stream"/>, so the stream in these tests is a requirement of that library and
+    /// not of MiniBson. Do not "clean it up" by pushing it into MiniBson's side.
+    /// </summary>
+    private static MemoryStream ToStream(byte[] document) => new(document);
+
+    /// <summary>
     /// MiniBson reads a document that Newtonsoft.Json.Bson wrote.
     /// </summary>
     [TestMethod]
@@ -29,7 +36,7 @@ public sealed class NewtonsoftBsonCrossTests
 
         // Read with MiniBson
         ms.Position = 0;
-        using var reader = new BsonReader(ms);
+        var reader = new BsonReader(ms.ToArray());
         reader.ReadStartDocument();
 
         Assert.IsTrue(reader.Read());
@@ -55,18 +62,14 @@ public sealed class NewtonsoftBsonCrossTests
     public void NewtonsoftReadsMiniBsonWrittenDocument()
     {
         // Write with MiniBson
-        using var ms = new MemoryStream();
-        using (var writer = new BsonWriter(ms, leaveOpen: true))
+        using var ms = ToStream(BsonTestWriter.Serialize(writer =>
         {
-            writer.WriteStartDocument();
             writer.WriteString("city", "Seattle");
             writer.WriteInt32("population", 750000);
             writer.WriteDouble("latitude", 47.6062);
-            writer.WriteEndDocument();
-        }
+        }));
 
         // Read with Newtonsoft
-        ms.Position = 0;
         using var reader = new BsonDataReader(ms);
 
         Assert.IsTrue(reader.Read()); // StartObject
@@ -120,7 +123,7 @@ public sealed class NewtonsoftBsonCrossTests
         }
 
         ms.Position = 0;
-        using var reader = new BsonReader(ms);
+        var reader = new BsonReader(ms.ToArray());
         reader.ReadStartDocument();
 
         Assert.IsTrue(reader.Read());
@@ -150,19 +153,16 @@ public sealed class NewtonsoftBsonCrossTests
     [TestMethod]
     public void NewtonsoftReadsMiniBsonWrittenArray()
     {
-        using var ms = new MemoryStream();
-        using (var writer = new BsonWriter(ms, leaveOpen: true))
+        using var ms = ToStream(BsonTestWriter.Serialize(writer =>
         {
-            writer.WriteStartDocument();
-            writer.WriteStartArray("items");
-            writer.WriteString("apple");
-            writer.WriteString("banana");
-            writer.WriteString("cherry");
-            writer.WriteEndArray();
-            writer.WriteEndDocument();
-        }
+            writer.Array("items", a =>
+            {
+                a.WriteString("apple");
+                a.WriteString("banana");
+                a.WriteString("cherry");
+            });
+        }));
 
-        ms.Position = 0;
         using var reader = new BsonDataReader(ms);
 
         Assert.IsTrue(reader.Read()); // StartObject
@@ -209,7 +209,7 @@ public sealed class NewtonsoftBsonCrossTests
         }
 
         ms.Position = 0;
-        using var reader = new BsonReader(ms);
+        var reader = new BsonReader(ms.ToArray());
         reader.ReadStartDocument();
 
         Assert.IsTrue(reader.Read());
@@ -242,16 +242,9 @@ public sealed class NewtonsoftBsonCrossTests
         var testDate = new DateTime(2024, 6, 15, 14, 30, 45, DateTimeKind.Utc);
 
         // Write with MiniBson
-        using var ms = new MemoryStream();
-        using (var writer = new BsonWriter(ms, leaveOpen: true))
-        {
-            writer.WriteStartDocument();
-            writer.WriteDateTime("timestamp", testDate);
-            writer.WriteEndDocument();
-        }
+        using var ms = ToStream(BsonTestWriter.Serialize(writer => writer.WriteDateTime("timestamp", testDate)));
 
         // Read with Newtonsoft
-        ms.Position = 0;
         using var newtonsoftReader = new BsonDataReader(ms);
         newtonsoftReader.ReadRootValueAsArray = false;
 
@@ -285,7 +278,7 @@ public sealed class NewtonsoftBsonCrossTests
 
         // Read with MiniBson
         ms.Position = 0;
-        using var reader = new BsonReader(ms);
+        var reader = new BsonReader(ms.ToArray());
         reader.ReadStartDocument();
 
         Assert.IsTrue(reader.Read());
@@ -305,16 +298,9 @@ public sealed class NewtonsoftBsonCrossTests
         var testData = new byte[] { 0x01, 0x02, 0x03, 0x04, 0x05, 0xAA, 0xBB, 0xCC };
 
         // Write with MiniBson
-        using var ms = new MemoryStream();
-        using (var writer = new BsonWriter(ms, leaveOpen: true))
-        {
-            writer.WriteStartDocument();
-            writer.WriteBinary("data", testData);
-            writer.WriteEndDocument();
-        }
+        using var ms = ToStream(BsonTestWriter.Serialize(writer => writer.WriteBinary("data", testData)));
 
         // Read with Newtonsoft
-        ms.Position = 0;
         using var newtonsoftReader = new BsonDataReader(ms);
 
         Assert.IsTrue(newtonsoftReader.Read()); // StartObject
@@ -346,14 +332,14 @@ public sealed class NewtonsoftBsonCrossTests
 
         // Read with MiniBson
         ms.Position = 0;
-        using var reader = new BsonReader(ms);
+        var reader = new BsonReader(ms.ToArray());
         reader.ReadStartDocument();
 
         Assert.IsTrue(reader.Read());
         Assert.AreEqual("bytes", reader.CurrentName);
         Assert.AreEqual(BsonType.Binary, reader.CurrentType);
 
-        var (data, subType) = reader.ReadBinary();
+        var data = reader.ReadBinaryArray(out var subType);
         CollectionAssert.AreEqual(testData, data);
     }
 
@@ -364,16 +350,9 @@ public sealed class NewtonsoftBsonCrossTests
     public void NullValueRoundTrip()
     {
         // Write with MiniBson
-        using var ms = new MemoryStream();
-        using (var writer = new BsonWriter(ms, leaveOpen: true))
-        {
-            writer.WriteStartDocument();
-            writer.WriteNull("nullField");
-            writer.WriteEndDocument();
-        }
+        using var ms = ToStream(BsonTestWriter.Serialize(writer => writer.WriteNull("nullField")));
 
         // Read with Newtonsoft
-        ms.Position = 0;
         using var newtonsoftReader = new BsonDataReader(ms);
 
         Assert.IsTrue(newtonsoftReader.Read()); // StartObject
@@ -401,7 +380,7 @@ public sealed class NewtonsoftBsonCrossTests
 
         // Read with MiniBson
         ms.Position = 0;
-        using var reader = new BsonReader(ms);
+        var reader = new BsonReader(ms.ToArray());
         reader.ReadStartDocument();
 
         Assert.IsTrue(reader.Read());
@@ -416,26 +395,24 @@ public sealed class NewtonsoftBsonCrossTests
     public void ComplexDocumentRoundTrip()
     {
         // Write with MiniBson
-        using var ms = new MemoryStream();
-        using (var writer = new BsonWriter(ms, leaveOpen: true))
+        using var ms = ToStream(BsonTestWriter.Serialize(writer =>
         {
-            writer.WriteStartDocument();
             writer.WriteString("type", "user");
             writer.WriteInt32("version", 1);
-            writer.WriteStartDocument("profile");
-            writer.WriteString("username", "testuser");
-            writer.WriteBoolean("verified", true);
-            writer.WriteEndDocument();
-            writer.WriteStartArray("scores");
-            writer.WriteInt32(100);
-            writer.WriteInt32(95);
-            writer.WriteInt32(87);
-            writer.WriteEndArray();
-            writer.WriteEndDocument();
-        }
+            writer.Document("profile", p =>
+            {
+                p.WriteString("username", "testuser");
+                p.WriteBoolean("verified", true);
+            });
+            writer.Array("scores", s =>
+            {
+                s.WriteInt32(100);
+                s.WriteInt32(95);
+                s.WriteInt32(87);
+            });
+        }));
 
         // Read with Newtonsoft and serialize to JSON string for verification
-        ms.Position = 0;
         using var newtonsoftReader = new BsonDataReader(ms);
         var serializer = new JsonSerializer();
         var obj = serializer.Deserialize<Dictionary<string, object>>(newtonsoftReader);
@@ -469,7 +446,7 @@ public sealed class NewtonsoftBsonCrossTests
 
         // Read with MiniBson
         ms.Position = 0;
-        using var reader = new BsonReader(ms);
+        var reader = new BsonReader(ms.ToArray());
         reader.ReadStartDocument();
 
         Assert.IsTrue(reader.Read());

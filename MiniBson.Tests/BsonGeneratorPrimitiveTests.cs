@@ -74,7 +74,7 @@ public sealed class BsonGeneratorPrimitiveTests
 
     private byte[] Serialize(object input)
     {
-        var bytes = DualPathWriter.Serialize(writer => _context.Serialize(input, writer));
+        var bytes = BsonTestWriter.Raw(writer => _context.Serialize(input, writer));
         Assert.AreEqual(bytes.Length, _context.GetSerializedSize(input),
             "GetSerializedSize disagrees with the bytes actually written.");
         return bytes;
@@ -82,8 +82,8 @@ public sealed class BsonGeneratorPrimitiveTests
 
     private T? RoundTrip<T>(T input) where T : notnull
     {
-        using var reader = new BsonReader(Serialize(input));
-        return (T?)_context.Deserialize(reader, typeof(T));
+        var reader = new BsonReader(Serialize(input));
+        return (T?)_context.Deserialize(ref reader, typeof(T));
     }
 
     [TestMethod]
@@ -281,7 +281,7 @@ public sealed class BsonGeneratorPrimitiveTests
     {
         var data = Serialize(new AllScalarArrayTypes { Guids = [Guid.NewGuid(), Guid.NewGuid()] });
 
-        using var reader = new BsonReader(data);
+        var reader = new BsonReader(data);
         reader.ReadStartDocument();
 
         var elementCount = -1;
@@ -319,7 +319,7 @@ public sealed class BsonGeneratorPrimitiveTests
         });
 
         var counts = new Dictionary<string, int>();
-        using var reader = new BsonReader(data);
+        var reader = new BsonReader(data);
         reader.ReadStartDocument();
         while (reader.Read())
         {
@@ -364,7 +364,7 @@ public sealed class BsonGeneratorPrimitiveTests
         });
 
         var seen = new Dictionary<string, BsonType>();
-        using var reader = new BsonReader(data);
+        var reader = new BsonReader(data);
         reader.ReadStartDocument();
         while (reader.Read())
         {

@@ -3,114 +3,163 @@ using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.IO;
-using System.Runtime.InteropServices;
 using System.Text;
 
 namespace MiniBson;
 
 /// <summary>
-/// A low-level, forward-only BSON reader.
+/// A low-level, forward-only BSON reader over caller memory.
 /// </summary>
+/// <remarks>
+/// <para>
+/// The reader does not copy the input and does not own it. It is a <see langword="ref"/>
+/// <see langword="struct"/> for that reason. The compiler then keeps the reader, and each span it
+/// returns, inside the lifetime of the input. This gives the reader the same rules as
+/// <c>Utf8JsonReader</c>. It cannot cross an <c>await</c>, a lambda cannot capture it, and a class
+/// cannot hold it in a field.
+/// </para>
+/// <para>
+/// The full document must be in memory before you construct a reader. Read the four-byte length
+/// first, wait for that number of bytes, and then give the reader that slice.
+/// </para>
+/// </remarks>
 #if MINIBSON_PUBLIC
-public sealed class BsonReader : IDisposable
+public ref struct BsonReader
 #else
-internal sealed class BsonReader : IDisposable
+internal ref struct BsonReader
 #endif
 {
-    private const int WindowSize = 8192;
-
     /// <summary>
-    /// The minimum length that a JavaScript-with-scope value can declare. It has its own
-    /// int32, an empty string, and an empty document.
+    /// The smallest length a JavaScript-with-scope value can declare: its own length prefix, an
+    /// empty string, and an empty document.
     /// </summary>
     private const int JavaScriptWithScopeOverhead = 4 + 5 + BsonSize.DocumentOverhead;
 
-    private readonly Stream? _stream;
-    private readonly bool _leaveOpen;
-    private readonly bool _canSeek;
+    // The current segment and the position in it. Each byte that the reader consumes comes from
+    // here. For input that is one piece, this is the full input, and the segment fields below do
+    // nothing.
+    private ReadOnlySpan<byte> _span;
+    private int _index;
+
+    /// <summary>The offset of <c>_span[0]</c> in the full input.</summary>
+    private long _segmentStart;
+
+    // The same bytes as _span, for an input form that has memory behind it. A reader from a plain
+    // span has no such memory. Thus ReadBinaryMemory copies there and in no other case.
+    private ReadOnlyMemory<byte> _segmentMemory;
+    private bool _hasMemory;
+
+    // Multi-segment input. _next positions the segment after _span.
+    private ReadOnlySequence<byte> _sequence;
+    private SequencePosition _next;
+    private bool _isMultiSegment;
+
+    /// <summary>The length of the full input.</summary>
+    private long _end;
 
     /// <summary>
-    /// True when <see cref="_buffer"/> is the caller's own memory and not a rented window.
-    /// Such a buffer already holds the full input, and nothing can refill it. Thus the reader
-    /// can return a slice of it and make no copy.
+    /// The end of the outermost open document, or <see cref="_end"/> when no document is open.
+    /// One test against this value covers the end of the document and the end of the input. Thus
+    /// no read tests them separately.
     /// </summary>
-    private readonly bool _bufferIsSource;
+    private long _limit;
 
-    // The bytes available to read, as the half-open range [_start, _end) of _buffer. All bytes
-    // that this reader consumes come from here. The reader uses the stream only to refill the
-    // window. Thus a different source (ReadOnlySequence, PipeReader) is a change to the refill
-    // path and not a change to each read method.
-    private byte[] _buffer;
-    private int _start;
-    private int _end;
+    // The open documents, packed as (endPosition << 1) | isArray. Depth 1 is a field, so a flat
+    // document allocates nothing. Only a nested document uses the array.
+    private long _frame0;
+    private long[]? _frames;
+    private int _depth;
 
-    private readonly Stack<DocumentContext> _contextStack = new();
+    private BsonType _type;
+    private ReadOnlySpan<byte> _nameSpan;
+    private string? _name;
 
-    // A count of the bytes that the reader consumed. The reader counts them and does not ask
-    // the stream, because a stream that cannot seek gives no answer. The reader also finds the
-    // end of each document with this count.
-    private long _position;
-
-    // The end of the outermost open document, or -1 when no document is open. No read goes
-    // past it. Thus a stream that holds a sequence of documents stays readable one document at
-    // a time.
-    private long _readLimit = -1;
-
-    private bool _disposed;
-
-    private struct DocumentContext
+    /// <summary>
+    /// Reads from a span. This form is the fastest. It is also the only form where
+    /// <see cref="ReadBinaryMemory"/> copies.
+    /// </summary>
+    public BsonReader(ReadOnlySpan<byte> data)
     {
-        public long EndPosition;
-        public bool IsArray;
+        this = default;
+        _span = data;
+        _end = data.Length;
+        _limit = _end;
     }
 
-    public BsonReader(Stream stream, bool leaveOpen = false)
+    /// <summary>
+    /// Reads from memory. <see cref="ReadBinaryMemory"/> returns a slice of it and makes no copy.
+    /// </summary>
+    public BsonReader(ReadOnlyMemory<byte> data)
     {
-        _stream = stream ?? throw new ArgumentNullException(nameof(stream));
-        _leaveOpen = leaveOpen;
-        _canSeek = stream.CanSeek;
-        _buffer = ArrayPool<byte>.Shared.Rent(WindowSize);
-        _bufferIsSource = false;
+        this = default;
+        _segmentMemory = data;
+        _span = data.Span;
+        _hasMemory = true;
+        _end = data.Length;
+        _limit = _end;
     }
 
+    /// <summary>Reads from an array.</summary>
     public BsonReader(byte[] data)
         : this(new ReadOnlyMemory<byte>(data ?? throw new ArgumentNullException(nameof(data))))
     {
     }
 
-    public BsonReader(ReadOnlyMemory<byte> data)
+    /// <summary>
+    /// Reads from a sequence, which is the form that a <c>PipeReader</c> gives. The reader joins
+    /// a value that lies across two segments. A value inside one segment costs nothing more.
+    /// </summary>
+    public BsonReader(in ReadOnlySequence<byte> data)
     {
-        if (MemoryMarshal.TryGetArray(data, out ArraySegment<byte> segment) && segment.Array is not null)
+        this = default;
+        _end = data.Length;
+        _limit = _end;
+
+        if (data.IsSingleSegment)
         {
-            _buffer = segment.Array;
-            _start = segment.Offset;
-            _end = segment.Offset + segment.Count;
-        }
-        else
-        {
-            _buffer = data.ToArray();
-            _start = 0;
-            _end = _buffer.Length;
+            // The input is one piece. Thus the segment code below does not run.
+            _segmentMemory = data.First;
+            _span = _segmentMemory.Span;
+            _hasMemory = true;
+            return;
         }
 
-        _bufferIsSource = true;
-        _leaveOpen = true;
+        _sequence = data;
+        _isMultiSegment = true;
+        _next = data.Start;
+
+        // The first segment is allowed to be empty. This call finds the first one that is not.
+        MoveNextSegment();
     }
 
     /// <summary>
-    /// The type of the current element after a call to Read().
+    /// The type of the current element after a call to <see cref="Read"/>.
     /// </summary>
-    public BsonType CurrentType { get; private set; }
+    public readonly BsonType CurrentType => _type;
 
     /// <summary>
-    /// The name of the current element after a call to Read().
+    /// The name of the current element after a call to <see cref="Read"/>. The reader decodes it
+    /// when you first read this property. Thus code that skips an element does not pay for its
+    /// name.
     /// </summary>
-    public string CurrentName { get; private set; } = string.Empty;
+    public string CurrentName => _name ??= DecodeString(_nameSpan);
+
+    /// <summary>
+    /// The name of the current element as UTF-8 bytes. It allocates no memory, except for a name
+    /// that lies across two segments.
+    /// </summary>
+    public readonly ReadOnlySpan<byte> CurrentNameSpan => _nameSpan;
 
     /// <summary>
     /// True when the reader is in an array.
     /// </summary>
-    public bool IsInArray => _contextStack.Count > 0 && _contextStack.Peek().IsArray;
+    public readonly bool IsInArray => _depth > 0 && (PeekFrame() & 1) != 0;
+
+    /// <summary>
+    /// The number of bytes that the reader consumed. Slice your input at this value to read the
+    /// document after this one.
+    /// </summary>
+    public readonly long BytesConsumed => _segmentStart + _index;
 
     /// <summary>
     /// Reads the start of a document. Call this method before you read the elements.
@@ -118,26 +167,46 @@ internal sealed class BsonReader : IDisposable
     public void ReadStartDocument() => PushDocument(isArray: false);
 
     /// <summary>
+    /// Reads the start of an embedded document.
+    /// </summary>
+    public void ReadStartNestedDocument()
+    {
+        EnsureType(BsonType.Document);
+        PushDocument(isArray: false);
+    }
+
+    /// <summary>
+    /// Reads the start of an array.
+    /// </summary>
+    public void ReadStartArray()
+    {
+        EnsureType(BsonType.Array);
+        PushDocument(isArray: true);
+    }
+
+    /// <summary>
     /// Reads the end of a document.
     /// </summary>
     public void ReadEndDocument()
     {
-        if (_contextStack.Count == 0)
+        if (_depth == 0)
             throw new InvalidOperationException("No document to end.");
 
-        var context = _contextStack.Pop();
+        var endPosition = PeekEnd();
+        _depth--;
 
-        // Move forward to the terminator, across each element that the caller did not read.
-        // The reader stops one byte before the end, and the code below tests that byte.
-        Advance(context.EndPosition - 1 - _position);
+        // Move forward to the terminator, across each element that the caller did not read. The
+        // reader stops one byte before the end, and the code below tests that byte.
+        Advance(endPosition - 1 - BytesConsumed);
 
         var endMarker = ReadByteCore();
         if (endMarker != 0)
             throw new InvalidDataException($"Expected end of document marker (0x00), got 0x{endMarker:X2}");
 
-        // The reader left the outermost document. Thus the next document can declare its own end.
-        if (_contextStack.Count == 0)
-            _readLimit = -1;
+        // The reader left the outermost document. Thus the next document in the same input can
+        // set its own end.
+        if (_depth == 0)
+            _limit = _end;
     }
 
     /// <summary>
@@ -148,56 +217,66 @@ internal sealed class BsonReader : IDisposable
     public void ReadEndArray() => ReadEndDocument();
 
     /// <summary>
-    /// Reads the length prefix of a document and opens a <c>DocumentContext</c> for it.
+    /// Reads the length prefix of a document and opens a frame for it.
     /// </summary>
     private void PushDocument(bool isArray)
     {
+        var start = BytesConsumed;
         var length = ReadLengthCore(BsonSize.DocumentOverhead, "A document");
-        var endPosition = _position + length - 4; // -4 because length includes itself
+        var endPosition = start + length; // length counts its own four bytes
 
-        if (_contextStack.Count == 0)
+        if (_depth == 0)
         {
-            _readLimit = endPosition;
+            // Without this test, a document that declares more bytes than the input holds fails
+            // later, inside some other value, with a message that does not name the true cause.
+            if (endPosition > _end)
+            {
+                throw new InvalidDataException(
+                    $"A document declares {length} bytes, but the input holds {_end - start}.");
+            }
+
+            _limit = endPosition;
         }
-        else if (endPosition > _contextStack.Peek().EndPosition)
+        else if (endPosition > PeekEnd())
         {
-            // Without this test, a nested length that is too large lets a read or a skip go
-            // past the end of the outer document and read the wrong bytes.
+            // Without this test, a nested length that is too large lets a read or a skip go past
+            // the end of the outer document and read the wrong bytes.
             throw new InvalidDataException(
                 $"A nested document declares {length} bytes, which does not fit in the document containing it.");
         }
 
-        _contextStack.Push(new DocumentContext { EndPosition = endPosition, IsArray = isArray });
+        PushFrame(endPosition, isArray);
     }
 
     /// <summary>
-    /// Reads the header of the next element. Returns true if there is an element. Returns
-    /// false at the end of the document.
+    /// Reads the header of the next element. Returns true if there is an element. Returns false
+    /// at the end of the document.
     /// </summary>
     public bool Read()
     {
-        if (_contextStack.Count == 0)
+        if (_depth == 0)
             throw new InvalidOperationException("Not inside a document. Call ReadStartDocument() first.");
 
-        var context = _contextStack.Peek();
-
         // Test for the end of the document.
-        if (_position >= context.EndPosition - 1)
+        if (BytesConsumed >= PeekEnd() - 1)
         {
-            CurrentType = default;
-            CurrentName = string.Empty;
+            _type = default;
+            _nameSpan = default;
+            _name = string.Empty;
             return false;
         }
 
-        CurrentType = (BsonType)ReadByteCore();
+        _type = (BsonType)ReadByteCore();
 
-        if (CurrentType == 0) // End of document marker
+        if (_type == 0) // End of document marker
         {
-            CurrentName = string.Empty;
+            _nameSpan = default;
+            _name = string.Empty;
             return false;
         }
 
-        CurrentName = ReadCString();
+        _nameSpan = TakeCString();
+        _name = null; // CurrentName decodes it, if the caller reads that property
         return true;
     }
 
@@ -268,12 +347,13 @@ internal sealed class BsonReader : IDisposable
     }
 
     /// <summary>
-    /// Reads a BSON ObjectId (12 bytes).
+    /// Reads a BSON ObjectId (12 bytes). The span points into your input unless the value lay
+    /// across two segments.
     /// </summary>
-    public byte[] ReadObjectId()
+    public ReadOnlySpan<byte> ReadObjectId()
     {
         EnsureType(BsonType.ObjectId);
-        return Take(BsonSize.ObjectId).ToArray();
+        return TakeContiguous(BsonSize.ObjectId);
     }
 
     /// <summary>
@@ -285,16 +365,43 @@ internal sealed class BsonReader : IDisposable
         if (destination.Length < BsonSize.ObjectId)
             throw new ArgumentException($"Destination must be at least {BsonSize.ObjectId} bytes.", nameof(destination));
 
-        Take(BsonSize.ObjectId).CopyTo(destination);
+        ReadIntoCore(destination.Slice(0, BsonSize.ObjectId));
     }
 
     /// <summary>
-    /// Reads binary data.
+    /// Reads binary data. The span points into your input and copies nothing, unless the value
+    /// lay across two segments.
     /// </summary>
-    public (byte[] Data, BsonBinarySubType SubType) ReadBinary()
+    public ReadOnlySpan<byte> ReadBinary(out BsonBinarySubType subType)
     {
-        var subType = ReadBinaryHeader(out var dataLength);
-        return (ReadBytesCore(dataLength), subType);
+        subType = ReadBinaryHeader(out var dataLength);
+        return TakeContiguous(dataLength);
+    }
+
+    /// <summary>
+    /// Reads binary data into a new array. Use it when the value must outlive your input.
+    /// </summary>
+    public byte[] ReadBinaryArray(out BsonBinarySubType subType)
+    {
+        subType = ReadBinaryHeader(out var dataLength);
+
+        if (dataLength == 0)
+            return [];
+
+        var data = new byte[dataLength];
+        ReadIntoCore(data);
+        return data;
+    }
+
+    /// <summary>
+    /// Reads binary data as a <see cref="ReadOnlyMemory{T}"/>. It is a slice of your input, with
+    /// no copy, for every constructor except <see cref="BsonReader(ReadOnlySpan{byte})"/> — a
+    /// span has no memory behind it to slice. A value across two segments is also copied.
+    /// </summary>
+    public ReadOnlyMemory<byte> ReadBinaryMemory(out BsonBinarySubType subType)
+    {
+        subType = ReadBinaryHeader(out var dataLength);
+        return TakeMemory(dataLength);
     }
 
     /// <summary>
@@ -318,40 +425,19 @@ internal sealed class BsonReader : IDisposable
     }
 
     /// <summary>
-    /// Reads binary data as a <see cref="ReadOnlyMemory{T}"/>. A reader from a
-    /// <see cref="byte"/> array, or from a <see cref="ReadOnlyMemory{T}"/> with an array behind
-    /// it, returns a slice of your memory and allocates nothing. A reader from a stream copies
-    /// the data into a new array. The slice points at your memory, so you see each change that
-    /// you make to it.
-    /// </summary>
-    public (ReadOnlyMemory<byte> Data, BsonBinarySubType SubType) ReadBinaryAsMemory()
-    {
-        var subType = ReadBinaryHeader(out var dataLength);
-
-        if (_bufferIsSource)
-        {
-            EnsureWithinDocument(dataLength);
-            if (dataLength > _end - _start)
-                throw new EndOfStreamException($"Expected {dataLength} bytes but the input ended after {_end - _start}.");
-
-            var slice = new ReadOnlyMemory<byte>(_buffer, _start, dataLength);
-            _start += dataLength;
-            _position += dataLength;
-            return (slice, subType);
-        }
-
-        return (ReadBytesCore(dataLength), subType);
-    }
-
-    /// <summary>
     /// Reads a GUID from binary data.
     /// </summary>
     public Guid ReadGuid()
     {
-        var (data, _) = ReadBinary();
+        var data = ReadBinary(out _);
         if (data.Length != 16)
             throw new InvalidDataException($"Expected 16 bytes for GUID, got {data.Length}.");
+
+#if NET6_0_OR_GREATER
         return new Guid(data);
+#else
+        return new Guid(data.ToArray());
+#endif
     }
 
     /// <summary>
@@ -360,8 +446,8 @@ internal sealed class BsonReader : IDisposable
     public (string Pattern, string Options) ReadRegex()
     {
         EnsureType(BsonType.Regex);
-        var pattern = ReadCString();
-        var options = ReadCString();
+        var pattern = DecodeString(TakeCString());
+        var options = DecodeString(TakeCString());
         return (pattern, options);
     }
 
@@ -378,20 +464,9 @@ internal sealed class BsonReader : IDisposable
     {
         // The declared length includes the value and its terminator.
         var valueLength = ReadLengthCore(1, "A string") - 1;
-
-        // The reader decodes the value in the window if the window is large enough, which is
-        // the usual condition. The other method copies the bytes into an array and then
-        // discards that array.
-        if (valueLength <= _end - _start || (_stream is not null && valueLength <= _buffer.Length))
-        {
-            var value = DecodeString(Take(valueLength));
-            ExpectStringTerminator();
-            return value;
-        }
-
-        var bytes = ReadBytesCore(valueLength);
+        var value = DecodeString(TakeContiguous(valueLength));
         ExpectStringTerminator();
-        return Encoding.UTF8.GetString(bytes, 0, bytes.Length);
+        return value;
     }
 
     private void ExpectStringTerminator()
@@ -410,24 +485,6 @@ internal sealed class BsonReader : IDisposable
         var increment = ReadUInt32Core();
         var timestamp = ReadUInt32Core();
         return (increment, timestamp);
-    }
-
-    /// <summary>
-    /// Reads the start of an embedded document.
-    /// </summary>
-    public void ReadStartNestedDocument()
-    {
-        EnsureType(BsonType.Document);
-        PushDocument(isArray: false);
-    }
-
-    /// <summary>
-    /// Reads the start of an array.
-    /// </summary>
-    public void ReadStartArray()
-    {
-        EnsureType(BsonType.Array);
-        PushDocument(isArray: true);
     }
 
     /// <summary>
@@ -477,8 +534,8 @@ internal sealed class BsonReader : IDisposable
                 // There is no data to skip.
                 break;
             case BsonType.Regex:
-                ReadCString(); // pattern
-                ReadCString(); // options
+                TakeCString(); // pattern
+                TakeCString(); // options
                 break;
             case BsonType.DBPointer:
                 // A deprecated type. It has a string and then a 12-byte ObjectId.
@@ -514,9 +571,9 @@ internal sealed class BsonReader : IDisposable
             BsonType.String => ReadString(),
             BsonType.Document => ReadDocumentAsDictionary(),
             BsonType.Array => ReadArrayAsList(),
-            BsonType.Binary => ReadBinary().Data,
+            BsonType.Binary => ReadBinaryArray(out _),
             BsonType.Undefined => null,
-            BsonType.ObjectId => ReadObjectId(),
+            BsonType.ObjectId => ReadObjectId().ToArray(),
             BsonType.Boolean => ReadBoolean(),
             BsonType.DateTime => ReadDateTime(),
             BsonType.Null => null,
@@ -554,88 +611,35 @@ internal sealed class BsonReader : IDisposable
         return list;
     }
 
-    /// <summary>
-    /// Reads a string with a null terminator. The window usually contains the terminator. Thus
-    /// the reader decodes the full name from one span.
-    /// </summary>
-    private string ReadCString()
+    // The open-document frames. Only these four members touch the packing, so a different
+    // container for them is a local change.
+
+    private void PushFrame(long endPosition, bool isArray)
     {
-        var available = _end - _start;
-        if (available > 0)
+        var packed = (endPosition << 1) | (isArray ? 1L : 0L);
+
+        if (_depth == 0)
         {
-            var index = new ReadOnlySpan<byte>(_buffer, _start, available).IndexOf((byte)0);
-            if (index >= 0)
-            {
-                EnsureWithinDocument(index + 1);
-                var value = DecodeString(new ReadOnlySpan<byte>(_buffer, _start, index));
-                _start += index + 1; // skip past null terminator
-                _position += index + 1;
-                return value;
-            }
+            _frame0 = packed;
+        }
+        else
+        {
+            var index = _depth - 1;
+
+            if (_frames is null)
+                _frames = new long[8];
+            else if (index >= _frames.Length)
+                Array.Resize(ref _frames, _frames.Length * 2);
+
+            _frames[index] = packed;
         }
 
-        if (_stream is null)
-        {
-            // Nothing can refill a buffer-backed reader. Thus a terminator that is not present
-            // means the end of the input. The one other cause is an empty window after a call
-            // to Dispose.
-            ThrowIfDisposed();
-            throw new InvalidDataException("Unterminated cstring.");
-        }
-
-        return ReadCStringAcrossRefills();
+        _depth++;
     }
 
-    /// <summary>
-    /// Collects the remainder of a cstring across more than one refill. The reader calls this
-    /// method when the window does not contain the terminator.
-    /// </summary>
-    private string ReadCStringAcrossRefills()
-    {
-        var scratch = ArrayPool<byte>.Shared.Rent(128);
-        var length = 0;
-        try
-        {
-            while (true)
-            {
-                var available = _end - _start;
-                if (available == 0)
-                {
-                    FillAtLeast(1); // Throws rather than returning an unterminated name.
-                    continue;
-                }
+    private readonly long PeekFrame() => _depth == 1 ? _frame0 : _frames![_depth - 2];
 
-                var index = new ReadOnlySpan<byte>(_buffer, _start, available).IndexOf((byte)0);
-                var take = index >= 0 ? index : available;
-
-                EnsureWithinDocument(index >= 0 ? take + 1 : take);
-
-                if (length + take > scratch.Length)
-                {
-                    var larger = ArrayPool<byte>.Shared.Rent(Math.Max(scratch.Length * 2, length + take));
-                    Buffer.BlockCopy(scratch, 0, larger, 0, length);
-                    ArrayPool<byte>.Shared.Return(scratch, clearArray: true);
-                    scratch = larger;
-                }
-
-                Buffer.BlockCopy(_buffer, _start, scratch, length, take);
-                length += take;
-                _start += take;
-                _position += take;
-
-                if (index >= 0)
-                {
-                    _start++; // null terminator
-                    _position++;
-                    return Encoding.UTF8.GetString(scratch, 0, length);
-                }
-            }
-        }
-        finally
-        {
-            ArrayPool<byte>.Shared.Return(scratch, clearArray: true);
-        }
-    }
+    private readonly long PeekEnd() => PeekFrame() >> 1;
 
     private void EnsureType(BsonType expected)
     {
@@ -654,10 +658,10 @@ internal sealed class BsonReader : IDisposable
     /// <see langword="params"/> array, which allocates memory. Only the failure path allocates
     /// it, and there the exception costs more than the array.
     /// </summary>
-    private InvalidOperationException UnexpectedType(params BsonType[] expected) =>
+    private readonly InvalidOperationException UnexpectedType(params BsonType[] expected) =>
         new(expected.Length == 1
-            ? $"Expected {expected[0]}, but current type is {CurrentType}."
-            : $"Expected one of [{string.Join(", ", expected)}], but current type is {CurrentType}.");
+            ? $"Expected {expected[0]}, but current type is {_type}."
+            : $"Expected one of [{string.Join(", ", expected)}], but current type is {_type}.");
 
     private static readonly DateTime UnixEpoch = new(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
 
@@ -670,24 +674,304 @@ internal sealed class BsonReader : IDisposable
 #endif
     }
 
-    // The read primitives. All bytes that this reader consumes go through one of these methods.
-    // Thus the position stays correct, and the reader does not ask the stream for it.
+    // The read primitives. Each byte that the reader consumes goes through one of these methods.
+    // They are also the only members that know whether the input is one piece or many. Thus each
+    // read method above has one body and does not test the shape of the input itself.
+
+    /// <summary>
+    /// Rejects a read that would go past the open document or past the input. One test covers
+    /// both, because <c>_limit</c> is the nearer of the two ends.
+    /// </summary>
+    private readonly void EnsureWithinLimit(long count)
+    {
+        if (BytesConsumed + count > _limit)
+        {
+            throw new InvalidDataException(
+                $"A value of {count} bytes does not fit in the {_limit - BytesConsumed} bytes that remain " +
+                "in the document. The input is malformed or truncated.");
+        }
+    }
+
+    /// <summary>
+    /// Moves to the next segment that is not empty. A sequence is allowed to hold an empty
+    /// segment at any place, including the first place and the last.
+    /// </summary>
+    private void MoveNextSegment()
+    {
+        // This keeps the position correct. _index returns to zero, and _segmentStart takes the
+        // length of the segment that the reader leaves.
+        _segmentStart += _span.Length;
+
+        while (_sequence.TryGet(ref _next, out var memory, advance: true))
+        {
+            if (memory.Length == 0)
+                continue;
+
+            _segmentMemory = memory;
+            _span = memory.Span;
+            _hasMemory = true;
+            _index = 0;
+            return;
+        }
+
+        _segmentMemory = default;
+        _span = default;
+        _index = 0;
+    }
+
+    /// <summary>
+    /// Returns <paramref name="count"/> adjacent bytes at the position of the reader, and does
+    /// not consume them. Returns false when the value crosses a segment boundary.
+    /// </summary>
+    private bool TryPeekContiguous(int count, out ReadOnlySpan<byte> span)
+    {
+        EnsureWithinLimit(count);
+
+        if (_index == _span.Length && _isMultiSegment)
+            MoveNextSegment();
+
+        if (_span.Length - _index >= count)
+        {
+            span = _span.Slice(_index, count);
+            return true;
+        }
+
+        span = default;
+        return false;
+    }
+
+    /// <summary>
+    /// Consumes exactly <c>destination.Length</c> bytes, across as many segments as it takes.
+    /// </summary>
+    /// <remarks>
+    /// <paramref name="destination"/> is <see langword="scoped"/>, so a caller can pass a
+    /// <see langword="stackalloc"/> buffer. Without that keyword the compiler must assume that
+    /// the reader keeps the span, and the span could then outlive its stack frame.
+    /// </remarks>
+    private void ReadIntoCore(scoped Span<byte> destination)
+    {
+        EnsureWithinLimit(destination.Length);
+
+        var written = 0;
+        while (written < destination.Length)
+        {
+            if (_index == _span.Length)
+            {
+                if (!_isMultiSegment)
+                    throw EndOfInput(destination.Length, written);
+
+                MoveNextSegment();
+
+                if (_span.Length == 0)
+                    throw EndOfInput(destination.Length, written);
+            }
+
+            var chunk = Math.Min(destination.Length - written, _span.Length - _index);
+            _span.Slice(_index, chunk).CopyTo(destination.Slice(written));
+            written += chunk;
+            _index += chunk;
+        }
+    }
+
+    /// <summary>
+    /// Consumes <paramref name="count"/> bytes and returns them as adjacent bytes. The result is
+    /// a slice of your input, with no copy, except for a value that crosses a segment boundary.
+    /// </summary>
+    private ReadOnlySpan<byte> TakeContiguous(int count)
+    {
+        if (count == 0)
+            return default;
+
+        if (TryPeekContiguous(count, out var span))
+        {
+            _index += count;
+            return span;
+        }
+
+        // The value is in more than one piece. The result leaves this method, so the buffer
+        // cannot come from a pool. The reader has no Dispose that could return it.
+        var copy = new byte[count];
+        ReadIntoCore(copy);
+        return copy;
+    }
+
+    /// <summary>
+    /// Consumes <paramref name="count"/> bytes as memory. The result is a slice of your input,
+    /// except when the reader has no memory behind it or the value crosses a segment boundary.
+    /// </summary>
+    private ReadOnlyMemory<byte> TakeMemory(int count)
+    {
+        if (count == 0)
+            return default;
+
+        if (_hasMemory && TryPeekContiguous(count, out _))
+        {
+            var slice = _segmentMemory.Slice(_index, count);
+            _index += count;
+            return slice;
+        }
+
+        var copy = new byte[count];
+        ReadIntoCore(copy);
+        return copy;
+    }
 
     private byte ReadByteCore()
     {
-        EnsureBuffered(1);
-        EnsureWithinDocument(1);
+        EnsureWithinLimit(1);
 
-        var value = _buffer[_start++];
-        _position++;
-        return value;
+        if (_index == _span.Length && _isMultiSegment)
+            MoveNextSegment();
+
+        if (_index == _span.Length)
+            throw EndOfInput(1, 0);
+
+        return _span[_index++];
     }
 
-    private int ReadInt32Core() => BinaryPrimitives.ReadInt32LittleEndian(Take(4));
+    /// <summary>
+    /// Moves the position forward and reads nothing. The reader uses it to skip a value, and to
+    /// reach the terminator of a document that has unread elements.
+    /// </summary>
+    private void Advance(long count)
+    {
+        if (count == 0)
+            return;
 
-    private uint ReadUInt32Core() => BinaryPrimitives.ReadUInt32LittleEndian(Take(4));
+        if (count < 0)
+        {
+            // A declared length that is too short gives a negative distance. Without this test
+            // the reader would move backwards, and each offset after this point would be wrong.
+            throw new InvalidDataException(
+                $"A declared length would move the reader {-count} bytes backwards. The input is malformed.");
+        }
 
-    private long ReadInt64Core() => BinaryPrimitives.ReadInt64LittleEndian(Take(8));
+        EnsureWithinLimit(count);
+
+        while (count > 0)
+        {
+            if (_index == _span.Length)
+            {
+                if (!_isMultiSegment)
+                    throw EndOfInput(count, 0);
+
+                MoveNextSegment();
+
+                if (_span.Length == 0)
+                    throw EndOfInput(count, 0);
+            }
+
+            var chunk = (int)Math.Min(count, _span.Length - _index);
+            _index += chunk;
+            count -= chunk;
+        }
+    }
+
+    /// <summary>
+    /// Consumes a string with a null terminator and returns its bytes without that terminator.
+    /// An element name and each part of a regular expression use this form.
+    /// </summary>
+    private ReadOnlySpan<byte> TakeCString()
+    {
+        // The search stops at the end of the document. Without that limit, a name with no
+        // terminator would take the bytes of the document after this one.
+        var searchable = (int)Math.Min(_span.Length - _index, _limit - BytesConsumed);
+
+        if (searchable > 0)
+        {
+            var index = _span.Slice(_index, searchable).IndexOf((byte)0);
+            if (index >= 0)
+            {
+                var value = _span.Slice(_index, index);
+                _index += index + 1; // past the terminator
+                return value;
+            }
+        }
+
+        if (!_isMultiSegment)
+            throw new InvalidDataException("Unterminated cstring.");
+
+        return TakeCStringAcrossSegments();
+    }
+
+    /// <summary>
+    /// Collects the rest of a cstring across segments. The result leaves this method. Thus it
+    /// goes into a new array and not into a pooled one.
+    /// </summary>
+    private ReadOnlySpan<byte> TakeCStringAcrossSegments()
+    {
+        var scratch = new byte[128];
+        var length = 0;
+
+        while (true)
+        {
+            if (_index == _span.Length)
+            {
+                MoveNextSegment();
+                if (_span.Length == 0)
+                    throw new InvalidDataException("Unterminated cstring.");
+            }
+
+            var searchable = (int)Math.Min(_span.Length - _index, _limit - BytesConsumed);
+            if (searchable == 0)
+                throw new InvalidDataException("Unterminated cstring.");
+
+            var index = _span.Slice(_index, searchable).IndexOf((byte)0);
+            var take = index >= 0 ? index : searchable;
+
+            if (length + take > scratch.Length)
+                Array.Resize(ref scratch, Math.Max(scratch.Length * 2, length + take));
+
+            _span.Slice(_index, take).CopyTo(scratch.AsSpan(length));
+            length += take;
+            _index += take;
+
+            if (index >= 0)
+            {
+                _index++; // past the terminator
+                return new ReadOnlySpan<byte>(scratch, 0, length);
+            }
+        }
+    }
+
+    private int ReadInt32Core()
+    {
+        if (TryPeekContiguous(4, out var span))
+        {
+            _index += 4;
+            return BinaryPrimitives.ReadInt32LittleEndian(span);
+        }
+
+        Span<byte> value = stackalloc byte[4];
+        ReadIntoCore(value);
+        return BinaryPrimitives.ReadInt32LittleEndian(value);
+    }
+
+    private uint ReadUInt32Core()
+    {
+        if (TryPeekContiguous(4, out var span))
+        {
+            _index += 4;
+            return BinaryPrimitives.ReadUInt32LittleEndian(span);
+        }
+
+        Span<byte> value = stackalloc byte[4];
+        ReadIntoCore(value);
+        return BinaryPrimitives.ReadUInt32LittleEndian(value);
+    }
+
+    private long ReadInt64Core()
+    {
+        if (TryPeekContiguous(8, out var span))
+        {
+            _index += 8;
+            return BinaryPrimitives.ReadInt64LittleEndian(span);
+        }
+
+        Span<byte> value = stackalloc byte[8];
+        ReadIntoCore(value);
+        return BinaryPrimitives.ReadInt64LittleEndian(value);
+    }
 
     // The raw bits keep this value little-endian on all machines, the same as BsonWriter.
     private double ReadDoubleCore() => BitConverter.Int64BitsToDouble(ReadInt64Core());
@@ -708,241 +992,6 @@ internal sealed class BsonReader : IDisposable
         return length;
     }
 
-    private byte[] ReadBytesCore(int count)
-    {
-        if (count == 0)
-            return [];
-
-        var bytes = new byte[count];
-        ReadExact(bytes, 0, count);
-        return bytes;
-    }
-
-    /// <summary>
-    /// Fills your buffer from the window. It then reads the other bytes directly from the
-    /// stream. Thus a value that is longer than the window never goes through the window.
-    /// </summary>
-    private void ReadExact(byte[] destination, int offset, int count)
-    {
-        ThrowIfDisposed();
-        EnsureWithinDocument(count);
-
-        var buffered = Math.Min(count, _end - _start);
-        if (buffered > 0)
-        {
-            Buffer.BlockCopy(_buffer, _start, destination, offset, buffered);
-            _start += buffered;
-            _position += buffered;
-            offset += buffered;
-            count -= buffered;
-        }
-
-        while (count > 0)
-        {
-            if (_stream is null)
-                throw new EndOfStreamException($"Expected {count} more bytes but the input ended.");
-
-            var read = _stream.Read(destination, offset, count);
-            if (read <= 0)
-                throw new EndOfStreamException($"Expected {count} more bytes but the input ended.");
-
-            _position += read;
-            offset += read;
-            count -= read;
-        }
-    }
-
-    /// <summary>
-    /// Consumes <paramref name="count"/> adjacent bytes from the window. Use this method only
-    /// for a value that is not longer than the window. A large value goes through
-    /// <see cref="ReadExact"/>.
-    /// </summary>
-    private ReadOnlySpan<byte> Take(int count)
-    {
-        EnsureBuffered(count);
-        EnsureWithinDocument(count);
-
-        var span = new ReadOnlySpan<byte>(_buffer, _start, count);
-        _start += count;
-        _position += count;
-        return span;
-    }
-
-    private void EnsureBuffered(int count)
-    {
-        if (_end - _start < count)
-            FillAtLeast(count);
-    }
-
-    /// <summary>
-    /// Rejects a call after a call to <see cref="Dispose"/>. This test is on the three methods
-    /// that each read reaches. It is not on each public method. <see cref="Dispose"/> empties
-    /// the window, so a method with more bytes to return must refill, copy, or skip to get
-    /// them. This costs one test for each read instead of one test for each primitive.
-    /// </summary>
-    private void ThrowIfDisposed()
-    {
-        if (_disposed)
-            throw new ObjectDisposedException(nameof(BsonReader));
-    }
-
-    private void FillAtLeast(int minimum)
-    {
-        ThrowIfDisposed();
-        EnsureWithinDocument(minimum);
-
-        if (_stream is null)
-            throw new EndOfStreamException($"Expected {minimum} bytes but the input ended after {_end - _start}.");
-
-        // Each refill starts at the front of the window. Thus the window can hold `minimum`
-        // adjacent bytes at each position of the reader.
-        var available = _end - _start;
-        if (_start > 0)
-        {
-            if (available > 0)
-                Buffer.BlockCopy(_buffer, _start, _buffer, 0, available);
-
-            _start = 0;
-            _end = available;
-        }
-
-        var target = RefillTarget(minimum);
-
-        while (_end < minimum)
-        {
-            var read = _stream.Read(_buffer, _end, target - _end);
-            if (read <= 0)
-                throw new EndOfStreamException($"Expected {minimum} bytes but the input ended after {_end}.");
-
-            _end += read;
-        }
-    }
-
-    /// <summary>
-    /// The number of bytes to put in the window. The reader stops at the end of the outermost
-    /// open document. Thus it never consumes the bytes that come after that document on the
-    /// stream. It also never reads from a peer that sent one document and now waits.
-    /// </summary>
-    private int RefillTarget(int minimum)
-    {
-        // No document is open, so no limit applies. Take only the bytes that the caller asked for.
-        if (_readLimit < 0)
-            return minimum;
-
-        var remaining = _readLimit - (_position + _end); // _start is 0 by the time this runs
-        var target = _end + (int)Math.Min(remaining, _buffer.Length - _end);
-        return target < minimum ? minimum : target;
-    }
-
-    /// <summary>
-    /// Rejects a read that goes past the outermost open document. Only a bad length can fail
-    /// this test. If the reader consumed those bytes, it would damage the data that comes
-    /// after them.
-    /// </summary>
-    private void EnsureWithinDocument(long count)
-    {
-        if (_readLimit >= 0 && _position + count > _readLimit)
-        {
-            throw new InvalidDataException(
-                $"Reading {count} bytes at position {_position} would run " +
-                $"{_position + count - _readLimit} bytes past the end of the document.");
-        }
-    }
-
-    /// <summary>
-    /// Moves forward across <paramref name="count"/> bytes. The caller does not see those bytes.
-    /// </summary>
-    private void Advance(long count)
-    {
-        if (count == 0)
-            return;
-
-        ThrowIfDisposed();
-
-        if (count < 0)
-        {
-            // Only a bad length prefix comes here. A silent return would put the reader before
-            // its own position and make it read the other bytes at the wrong offsets.
-            throw new InvalidDataException(
-                $"A declared length would move the reader {-count} bytes backwards. The input is malformed.");
-        }
-
-        EnsureWithinDocument(count);
-
-        // Take the bytes in the window first. The stream is already past them.
-        var buffered = (int)Math.Min(count, _end - _start);
-        _start += buffered;
-        _position += buffered;
-        count -= buffered;
-
-        if (count == 0)
-            return;
-
-        if (_stream is null)
-            throw new EndOfStreamException($"Expected {count} more bytes but the input ended.");
-
-        if (_canSeek)
-        {
-            _stream.Position += count;
-            _position += count;
-            return;
-        }
-
-        // The stream cannot seek, so the reader must consume the bytes and discard them. The
-        // window is empty now, so the reader uses it for those bytes.
-        _start = 0;
-        _end = 0;
-
-        while (count > 0)
-        {
-            var chunk = (int)Math.Min(count, _buffer.Length);
-            var read = _stream.Read(_buffer, 0, chunk);
-            if (read <= 0)
-                throw new EndOfStreamException($"Expected {count} more bytes but the input ended.");
-
-            _position += read;
-            count -= read;
-        }
-    }
-
-    public void Dispose()
-    {
-        if (_disposed)
-            return;
-
-        _disposed = true;
-
-        var buffered = _end - _start;
-        _start = 0;
-        _end = 0;
-
-        var buffer = _buffer;
-        _buffer = [];
-
-        if (!_bufferIsSource)
-        {
-            // Clear the array. The pool gives it to the next caller without a change, and it
-            // still holds the data that the reader read through it.
-            ArrayPool<byte>.Shared.Return(buffer, clearArray: true);
-        }
-
-        if (_stream is null)
-            return;
-
-        if (!_leaveOpen)
-        {
-            _stream.Dispose();
-            return;
-        }
-
-        // The read-ahead put the stream past the bytes that this reader consumed. Return those
-        // bytes, so a caller that keeps the stream continues at the correct position.
-        //
-        // This is the one place that asks the stream about seek support a second time. In each
-        // other place, _canSeek is sufficient. But Dispose can run after the caller closed the
-        // stream, and a seek on a closed stream throws. That exception would come out of
-        // Dispose, and it would be about bytes that nobody can read.
-        if (buffered > 0 && _canSeek && _stream.CanSeek)
-            _stream.Position -= buffered;
-    }
+    private readonly InvalidDataException EndOfInput(long expected, int got) =>
+        new($"Expected {expected} bytes but the input ended after {got}.");
 }

@@ -29,9 +29,9 @@ internal sealed class BsonSizeTable
 #endif
 {
     /// <summary>
-    /// A table that records nothing and gives each length as unknown. Use it for a destination
-    /// that can seek. There the writer writes each length later, so a measurement gives no
-    /// advantage and the measure pass does not run.
+    /// A table that records nothing. Use it to run the measure pass only for the total length,
+    /// as <c>GetSerializedSize</c> does. It cannot drive a write pass, because a write pass needs
+    /// the lengths that this table discards.
     /// </summary>
     public static readonly BsonSizeTable None = new(active: false);
 
@@ -47,17 +47,9 @@ internal sealed class BsonSizeTable
     }
 
     /// <summary>
-    /// A table for the measure pass, or <see cref="None"/> when the destination needs no length
-    /// from the caller.
+    /// A table for the measure pass.
     /// </summary>
-    public static BsonSizeTable Rent(bool active) => active ? new BsonSizeTable(active: true) : None;
-
-    /// <summary>
-    /// True when this table records the lengths. It is false for <see cref="None"/>. The one
-    /// purpose of <see cref="None"/> is to let the write pass use the same code with no
-    /// measurement.
-    /// </summary>
-    public bool IsActive => _active;
+    public static BsonSizeTable Rent() => new(active: true);
 
     /// <summary>
     /// Keeps the slot for the next document, before the measure pass knows the length of that
@@ -84,15 +76,22 @@ internal sealed class BsonSizeTable
     }
 
     /// <summary>
-    /// The next length, in the order that the measure pass kept the slots. For
-    /// <see cref="None"/>, this method returns 0.
-    /// <see cref="BsonWriter.WriteStartDocument(int)"/> reads 0 as an unknown length and writes
-    /// the length later.
+    /// The next length, in the order that the measure pass kept the slots.
     /// </summary>
+    /// <exception cref="InvalidOperationException">
+    /// This table is <see cref="None"/>, which records no length, or the write pass asked for
+    /// more lengths than the measure pass recorded.
+    /// </exception>
     public int Next()
     {
+        // None records nothing. Thus it has no length to give. Each document length is required,
+        // so a 0 here would become an error inside the writer that does not name the cause.
         if (!_active)
-            return 0;
+        {
+            throw new InvalidOperationException(
+                "BsonSizeTable.None records no document lengths, so it cannot drive a write pass. " +
+                "Use BsonSizeTable.Rent().");
+        }
 
         if (_cursor >= _count)
         {

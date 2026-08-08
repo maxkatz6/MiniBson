@@ -9,18 +9,8 @@ namespace MiniBson.Tests;
 [TestClass]
 public sealed class BsonSizeTests
 {
-    private static int WrittenLength(Action<BsonWriter> write)
-    {
-        using var ms = new MemoryStream();
-        using (var writer = new BsonWriter(ms, leaveOpen: true))
-        {
-            writer.WriteStartDocument();
-            write(writer);
-            writer.WriteEndDocument();
-        }
-
-        return (int)ms.Length;
-    }
+    private static int WrittenLength(Action<BsonWriter> write) =>
+        BsonTestWriter.Serialize(write).Length;
 
     [TestMethod]
     public void EmptyDocumentIsDocumentOverhead()
@@ -178,9 +168,7 @@ public sealed class BsonSizeTests
             BsonSize.DocumentOverhead + BsonSize.Element("inner") + innerLength,
             WrittenLength(w =>
             {
-                w.WriteStartDocument("inner");
-                w.WriteInt32("n", 1);
-                w.WriteEndDocument();
+                w.Document("inner", d => d.WriteInt32("n", 1));
             }));
     }
 
@@ -202,10 +190,11 @@ public sealed class BsonSizeTests
                 + BsonSize.ArrayOverhead(count) + count * BsonSize.Int32,
             WrittenLength(w =>
             {
-                w.WriteStartArray("items");
-                for (var i = 0; i < count; i++)
-                    w.WriteInt32(i);
-                w.WriteEndArray();
+                w.Array("items", a =>
+                {
+                    for (var i = 0; i < count; i++)
+                        a.WriteInt32(i);
+                });
             }));
     }
 

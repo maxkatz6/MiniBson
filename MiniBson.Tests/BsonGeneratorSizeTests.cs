@@ -12,13 +12,8 @@ public sealed class BsonGeneratorSizeTests
 {
     private readonly TestBsonContext _context = new();
 
-    private int WrittenLength(object value)
-    {
-        using var ms = new MemoryStream();
-        using (var writer = new BsonWriter(ms, leaveOpen: true))
-            _context.Serialize(value, writer);
-        return (int)ms.Length;
-    }
+    private int WrittenLength(object value) =>
+        BsonTestWriter.Raw(writer => _context.Serialize(value, writer)).Length;
 
     [TestMethod]
     public void MatchesWrittenLengthForAFlatModel()
@@ -98,23 +93,26 @@ public sealed class BsonGeneratorSizeTests
     }
 
     /// <summary>
-    /// This is the length that the writer gets for a destination that cannot seek. Thus a
-    /// disagreement throws an exception there. It is not only a wrong number.
+    /// This is the length that the writer computes for itself. Thus a disagreement throws an
+    /// exception in <see cref="BsonWriter.WriteEndDocument"/>. It is not only a wrong number.
     /// </summary>
+    /// <remarks>
+    /// It is also the reason to ask for the size. A destination that takes its capacity from this
+    /// number rents one buffer and does not grow.
+    /// </remarks>
     [TestMethod]
-    public void SizeCanBeUsedToFrameAWriteOnANonSeekableStream()
+    public void SizeExactlyPreSizesABufferWriter()
     {
         var value = new SimpleType { Name = "framed", Age = 1, IsActive = false };
         var size = _context.GetSerializedSize(value);
 
-        using var backing = new MemoryStream();
-        using (var nonSeekable = new NonSeekableStream(backing))
-        using (var writer = new BsonWriter(nonSeekable, leaveOpen: true))
-        {
-            _context.Serialize(value, writer);
-        }
+        using var output = new BsonBufferWriter(size);
+        var capacity = output.Capacity;
 
-        Assert.AreEqual(size, backing.ToArray().Length);
+        _context.Serialize(value, new BsonWriter(output));
+
+        Assert.AreEqual(size, output.WrittenCount);
+        Assert.AreEqual(capacity, output.Capacity, "The destination grew, so the size was not exact.");
     }
 
     [TestMethod]

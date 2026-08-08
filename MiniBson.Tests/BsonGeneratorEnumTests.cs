@@ -109,7 +109,7 @@ public sealed class BsonGeneratorEnumTests
 
     private byte[] Serialize(object input)
     {
-        var bytes = DualPathWriter.Serialize(writer => _context.Serialize(input, writer));
+        var bytes = BsonTestWriter.Raw(writer => _context.Serialize(input, writer));
         Assert.AreEqual(bytes.Length, _context.GetSerializedSize(input),
             "GetSerializedSize disagrees with the bytes actually written.");
         return bytes;
@@ -117,8 +117,8 @@ public sealed class BsonGeneratorEnumTests
 
     private T? Deserialize<T>(byte[] data)
     {
-        using var reader = new BsonReader(data);
-        return (T?)_context.Deserialize(reader, typeof(T));
+        var reader = new BsonReader(data);
+        return (T?)_context.Deserialize(ref reader, typeof(T));
     }
 
     private T? RoundTrip<T>(T input) where T : notnull => Deserialize<T>(Serialize(input));
@@ -343,7 +343,7 @@ public sealed class BsonGeneratorEnumTests
             ULongValue = ULongEnum.Max
         });
 
-        using var reader = new BsonReader(data);
+        var reader = new BsonReader(data);
         reader.ReadStartDocument();
 
         while (reader.Read())
@@ -380,7 +380,7 @@ public sealed class BsonGeneratorEnumTests
         });
 
         var seen = new Dictionary<string, BsonType>();
-        using var reader = new BsonReader(data);
+        var reader = new BsonReader(data);
         reader.ReadStartDocument();
         while (reader.Read())
         {

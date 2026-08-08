@@ -158,34 +158,52 @@ public sealed class BsonGeneratorTests
 
     private void Serialize(object input, Stream output)
     {
-        // Routed through DualPathWriter so every test here also checks measure against write.
-        var bytes = DualPathWriter.Serialize(writer => _context.Serialize(input, writer));
+        // The writer compares the measured length against the bytes written for each document.
+        // Thus each test here also tests the measure pass against the write pass.
+        var bytes = BsonTestWriter.Raw(writer => _context.Serialize(input, writer));
         Assert.AreEqual(bytes.Length, _context.GetSerializedSize(input),
             "GetSerializedSize disagrees with the bytes actually written.");
         output.Write(bytes, 0, bytes.Length);
     }
 
+    /// <summary>
+    /// Deserializes the same bytes two times: from one piece, and from a sequence of small
+    /// segments. A value that lies across a segment boundary takes a different path in the
+    /// reader, and one adjacent buffer never runs that path.
+    /// </summary>
     private object? Deserialize(Stream input, Type type)
     {
-        // Routed through DualPathReader so every test here also covers deserializing from a
-        // stream that cannot seek, where skipping consumes bytes instead of jumping over them.
-        var document = DualPathReader.Drain(input);
-        var (seekable, streamed) = DualPathReader.Read(document, r => _context.Deserialize(r, type));
+        var document = Drain(input);
 
-        if (seekable is null || streamed is null)
+        var contiguous = DeserializeFrom(new BsonReader(document), type);
+        var fragmented = DeserializeFrom(new BsonReader(SequenceFactory.Chunked(document, 3)), type);
+
+        if (contiguous is null || fragmented is null)
         {
-            Assert.AreEqual(seekable, streamed, "Deserializing without seeking produced a different value.");
-            return seekable;
+            Assert.AreEqual(contiguous, fragmented, "Deserializing from a segmented input produced a different value.");
+            return contiguous;
         }
 
         // These models are mostly classes without value equality, so compare what they encode
         // back to rather than the instances themselves.
         CollectionAssert.AreEqual(
-            DualPathWriter.Serialize(w => _context.Serialize(seekable, w)),
-            DualPathWriter.Serialize(w => _context.Serialize(streamed, w)),
-            "Deserializing without seeking produced a different value.");
+            BsonTestWriter.Raw(w => _context.Serialize(contiguous, w)),
+            BsonTestWriter.Raw(w => _context.Serialize(fragmented, w)),
+            "Deserializing from a segmented input produced a different value.");
 
-        return seekable;
+        return contiguous;
+    }
+
+    private object? DeserializeFrom(BsonReader reader, Type type) => _context.Deserialize(ref reader, type);
+
+    private static byte[] Drain(Stream input)
+    {
+        if (input is MemoryStream memory)
+            return memory.ToArray();
+
+        using var copy = new MemoryStream();
+        input.CopyTo(copy);
+        return copy.ToArray();
     }
 
     [TestMethod]
@@ -393,14 +411,9 @@ public sealed class BsonGeneratorTests
     [TestMethod]
     public void DeserializeUnsupportedTypeThrows()
     {
-        using var ms = new MemoryStream();
         // Write some valid BSON
-        using (var writer = new BsonWriter(ms, leaveOpen: true))
-        {
-            writer.WriteStartDocument();
-            writer.WriteEndDocument();
-        }
-        ms.Position = 0;
+        var empty = BsonTestWriter.Serialize(_ => { });
+        using var ms = new MemoryStream(empty);
 
         Assert.Throws<NotSupportedException>(() => Deserialize(ms, typeof(string)));
     }
@@ -708,7 +721,7 @@ public sealed class BsonGeneratorTests
 
         // Read back with raw BsonReader to verify it's stored as int
         ms.Position = 0;
-        using var reader = new BsonReader(ms);
+        var reader = new BsonReader(ms.ToArray());
         reader.ReadStartDocument();
 
         Assert.IsTrue(reader.Read());
@@ -740,7 +753,7 @@ public sealed class BsonGeneratorTests
 
         // Read back with raw BsonReader to verify it's stored as int64
         ms.Position = 0;
-        using var reader = new BsonReader(ms);
+        var reader = new BsonReader(ms.ToArray());
         reader.ReadStartDocument();
 
         Assert.IsTrue(reader.Read());
@@ -829,7 +842,7 @@ public sealed class BsonGeneratorTests
 
         // Verify with raw reader that all 4 properties are serialized
         ms.Position = 0;
-        using var reader = new BsonReader(ms);
+        var reader = new BsonReader(ms.ToArray());
         reader.ReadStartDocument();
 
         var propertiesRead = new HashSet<string>();
@@ -872,7 +885,7 @@ public sealed class BsonGeneratorTests
 
         // Verify BSON structure with raw reader
         ms.Position = 0;
-        using var reader = new BsonReader(ms);
+        var reader = new BsonReader(ms.ToArray());
         reader.ReadStartDocument();
 
         Assert.IsTrue(reader.Read());
@@ -931,7 +944,7 @@ public sealed class BsonGeneratorTests
 
         // Verify BSON structure
         ms.Position = 0;
-        using var reader = new BsonReader(ms);
+        var reader = new BsonReader(ms.ToArray());
         reader.ReadStartDocument();
 
         Assert.IsTrue(reader.Read());
@@ -973,7 +986,7 @@ public sealed class BsonGeneratorTests
 
         // Verify BSON structure
         ms.Position = 0;
-        using var reader = new BsonReader(ms);
+        var reader = new BsonReader(ms.ToArray());
         reader.ReadStartDocument();
 
         Assert.IsTrue(reader.Read());
@@ -1049,7 +1062,7 @@ public sealed class BsonGeneratorTests
 
         // Verify BSON structure
         ms.Position = 0;
-        using var reader = new BsonReader(ms);
+        var reader = new BsonReader(ms.ToArray());
         reader.ReadStartDocument();
 
         Assert.IsTrue(reader.Read());

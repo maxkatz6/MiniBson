@@ -52,30 +52,23 @@ public sealed class BsonReaderSkipTests
         [.. Element(BsonType.Decimal128, name), .. new byte[16]];
 
     /// <summary>
-    /// Reads the element after a skipped element, on a stream that can seek and on a stream
-    /// that cannot. A skip does a seek where it can, and it consumes the bytes where it cannot.
-    /// Thus you see a wrong length on only one of the two streams.
+    /// Reads the element after a skipped element. A skip that moves the wrong distance shows up
+    /// here as a wrong name or a wrong value, not as an error at the skip itself.
     /// </summary>
     private static void AssertSkipsTo(byte[] document, string expectedName, int expectedValue)
     {
-        var (seekable, streamed) = DualPathReader.Read(document, reader =>
-        {
-            reader.ReadStartDocument();
+        var reader = new BsonReader(document);
+        reader.ReadStartDocument();
 
-            Assert.IsTrue(reader.Read());
-            reader.Skip();
+        Assert.IsTrue(reader.Read());
+        reader.Skip();
 
-            Assert.IsTrue(reader.Read());
-            Assert.AreEqual(expectedName, reader.CurrentName);
-            var value = reader.ReadInt32();
+        Assert.IsTrue(reader.Read());
+        Assert.AreEqual(expectedName, reader.CurrentName);
+        Assert.AreEqual(expectedValue, reader.ReadInt32());
 
-            Assert.IsFalse(reader.Read());
-            reader.ReadEndDocument();
-            return value;
-        });
-
-        Assert.AreEqual(expectedValue, seekable);
-        Assert.AreEqual(expectedValue, streamed);
+        Assert.IsFalse(reader.Read());
+        reader.ReadEndDocument();
     }
 
     [TestMethod]
@@ -98,7 +91,7 @@ public sealed class BsonReaderSkipTests
     {
         var document = Document(DbPointer("ptr", "some.collection"));
 
-        using var reader = new BsonReader(document);
+        var reader = new BsonReader(document);
         reader.ReadStartDocument();
 
         Assert.IsTrue(reader.Read());
@@ -116,13 +109,13 @@ public sealed class BsonReaderSkipTests
         const byte unassigned = 0x7E;
         var document = Document([unassigned, .. CString("weird")]);
 
-        using var reader = new BsonReader(document);
+        var reader = new BsonReader(document);
         reader.ReadStartDocument();
 
         Assert.IsTrue(reader.Read());
         Assert.AreEqual("weird", reader.CurrentName);
 
-        var exception = Assert.Throws<InvalidDataException>(() => reader.Skip());
+        var exception = ReaderAssert.Throws<InvalidDataException>(ref reader, (ref BsonReader r) => r.Skip());
         StringAssert.Contains(exception.Message, "0x7E");
     }
 }
