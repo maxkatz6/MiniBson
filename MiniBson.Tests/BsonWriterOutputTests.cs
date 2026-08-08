@@ -318,6 +318,21 @@ public sealed class BsonWriterOutputTests
         StringAssert.Contains(ex.Message, "IBufferWriter");
     }
 
+    [TestMethod]
+    public void ADocumentThatFailsToOpenLeavesNoFrame()
+    {
+        var writer = new BsonWriter(new StingyBufferWriter());
+
+        Assert.ThrowsExactly<InvalidOperationException>(
+            () => writer.WriteStartDocument(BsonSize.DocumentOverhead));
+
+        // The length prefix never reached the buffer.
+        Assert.AreEqual(0L, writer.BytesWritten);
+
+        var ex = Assert.ThrowsExactly<InvalidOperationException>(() => writer.WriteEndDocument());
+        StringAssert.Contains(ex.Message, "no open document");
+    }
+
     /// <summary>A destination that ignores the size hint and gives one byte each time.</summary>
     private sealed class StingyBufferWriter : IBufferWriter<byte>
     {

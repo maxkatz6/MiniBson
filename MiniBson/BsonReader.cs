@@ -421,6 +421,8 @@ internal ref struct BsonReader
         if (subType == BsonBinarySubType.BinaryOld)
             dataLength = ReadLengthCore(0, "A binary value");
 
+        EnsureWithinLimit(dataLength);
+
         return subType;
     }
 
@@ -519,7 +521,7 @@ internal ref struct BsonReader
                 break;
             case BsonType.Binary:
                 var binLength = ReadLengthCore(0, "A binary value");
-                Advance(1 + binLength); // subtype + data
+                Advance(1L + binLength); // subtype + data
                 break;
             case BsonType.ObjectId:
                 Advance(BsonSize.ObjectId);
@@ -540,7 +542,7 @@ internal ref struct BsonReader
             case BsonType.DBPointer:
                 // A deprecated type. It has a string and then a 12-byte ObjectId.
                 var pointerLength = ReadLengthCore(1, "A string");
-                Advance(pointerLength + BsonSize.ObjectId);
+                Advance((long)pointerLength + BsonSize.ObjectId);
                 break;
             case BsonType.Int32:
                 Advance(4);
@@ -774,6 +776,19 @@ internal ref struct BsonReader
     }
 
     /// <summary>
+    /// Consumes <paramref name="count"/> adjacent bytes and returns them as a slice of the input, with no copy.
+    /// Returns false when the value crosses a segment boundary, and then consumes nothing, so the caller can read the value a second way.
+    /// </summary>
+    private bool TryTakeContiguous(int count, out ReadOnlySpan<byte> span)
+    {
+        if (!TryPeekContiguous(count, out span))
+            return false;
+
+        _index += count;
+        return true;
+    }
+
+    /// <summary>
     /// Consumes <paramref name="count"/> bytes and returns them as adjacent bytes. The result is
     /// a slice of your input, with no copy, except for a value that crosses a segment boundary.
     /// </summary>
@@ -782,11 +797,8 @@ internal ref struct BsonReader
         if (count == 0)
             return default;
 
-        if (TryPeekContiguous(count, out var span))
-        {
-            _index += count;
+        if (TryTakeContiguous(count, out var span))
             return span;
-        }
 
         // The value is in more than one piece. The result leaves this method, so the buffer
         // cannot come from a pool. The reader has no Dispose that could return it.
@@ -803,6 +815,8 @@ internal ref struct BsonReader
     {
         if (count == 0)
             return default;
+
+        EnsureWithinLimit(count);
 
         if (_hasMemory && TryPeekContiguous(count, out _))
         {
@@ -936,41 +950,32 @@ internal ref struct BsonReader
 
     private int ReadInt32Core()
     {
-        if (TryPeekContiguous(4, out var span))
-        {
-            _index += 4;
+        if (TryTakeContiguous(4, out var span))
             return BinaryPrimitives.ReadInt32LittleEndian(span);
-        }
 
-        Span<byte> value = stackalloc byte[4];
-        ReadIntoCore(value);
-        return BinaryPrimitives.ReadInt32LittleEndian(value);
+        Span<byte> scratch = stackalloc byte[4];
+        ReadIntoCore(scratch);
+        return BinaryPrimitives.ReadInt32LittleEndian(scratch);
     }
 
     private uint ReadUInt32Core()
     {
-        if (TryPeekContiguous(4, out var span))
-        {
-            _index += 4;
+        if (TryTakeContiguous(4, out var span))
             return BinaryPrimitives.ReadUInt32LittleEndian(span);
-        }
 
-        Span<byte> value = stackalloc byte[4];
-        ReadIntoCore(value);
-        return BinaryPrimitives.ReadUInt32LittleEndian(value);
+        Span<byte> scratch = stackalloc byte[4];
+        ReadIntoCore(scratch);
+        return BinaryPrimitives.ReadUInt32LittleEndian(scratch);
     }
 
     private long ReadInt64Core()
     {
-        if (TryPeekContiguous(8, out var span))
-        {
-            _index += 8;
+        if (TryTakeContiguous(8, out var span))
             return BinaryPrimitives.ReadInt64LittleEndian(span);
-        }
 
-        Span<byte> value = stackalloc byte[8];
-        ReadIntoCore(value);
-        return BinaryPrimitives.ReadInt64LittleEndian(value);
+        Span<byte> scratch = stackalloc byte[8];
+        ReadIntoCore(scratch);
+        return BinaryPrimitives.ReadInt64LittleEndian(scratch);
     }
 
     // The raw bits keep this value little-endian on all machines, the same as BsonWriter.

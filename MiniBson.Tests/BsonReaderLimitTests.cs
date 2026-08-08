@@ -145,6 +145,79 @@ public sealed class BsonReaderLimitTests
         ReaderAssert.Throws<InvalidDataException>(ref reader, (ref BsonReader r) => r.ReadBinaryMemory(out _));
     }
 
+    [TestMethod]
+    public void ABinaryLengthPastTheDocumentAllocatesNothing()
+    {
+        // 200 MB declared by a document of a few dozen bytes.
+        const int declared = 200_000_000;
+        var document = Write(w => w.WriteBinary("bin", new byte[8]));
+        BitConverter.GetBytes(declared).CopyTo(document, BinaryLengthOffset);
+
+        AssertReadAllocatesLittle("ReadBinaryArray", document, (ref BsonReader r) => r.ReadBinaryArray(out _));
+        AssertReadAllocatesLittle("ReadBinary", document, (ref BsonReader r) => r.ReadBinary(out _));
+        AssertReadAllocatesLittle("ReadBinaryMemory", document, (ref BsonReader r) => r.ReadBinaryMemory(out _));
+    }
+
+    [TestMethod]
+    public void ABinaryLengthPastTheDocumentAllocatesNothingOnASpanReader()
+    {
+        var document = Write(w => w.WriteBinary("bin", new byte[8]));
+        BitConverter.GetBytes(200_000_000).CopyTo(document, BinaryLengthOffset);
+
+        var before = GC.GetAllocatedBytesForCurrentThread();
+
+        var reader = new BsonReader(new ReadOnlySpan<byte>(document));
+        reader.ReadStartDocument();
+        Assert.IsTrue(reader.Read());
+        ReaderAssert.Throws<InvalidDataException>(ref reader, (ref BsonReader r) => r.ReadBinaryMemory(out _));
+
+        AssertLittleAllocated("ReadBinaryMemory over a span", before);
+    }
+
+    [TestMethod]
+    public void SkippingBinaryWithAnUnwrappableLengthReportsTheRealFault()
+    {
+        var document = Write(w => w.WriteBinary("bin", new byte[8]));
+        BitConverter.GetBytes(int.MaxValue).CopyTo(document, BinaryLengthOffset);
+
+        var reader = new BsonReader(document);
+        reader.ReadStartDocument();
+        Assert.IsTrue(reader.Read());
+
+        var ex = ReaderAssert.Throws<InvalidDataException>(ref reader, (ref BsonReader r) => r.Skip());
+
+        StringAssert.Contains(ex.Message, "does not fit");
+        Assert.IsFalse(
+            ex.Message.Contains("backwards"),
+            $"The addition wrapped and blamed a backwards move: {ex.Message}");
+    }
+
+    /// <summary>The offset of the binary payload's length prefix in a document holding one "bin".</summary>
+    private const int BinaryLengthOffset = 4 + 1 + 4; // root length, type byte, "bin\0"
+
+    private static void AssertReadAllocatesLittle(string what, byte[] document, ReaderAssert.ReaderAction read)
+    {
+        var before = GC.GetAllocatedBytesForCurrentThread();
+
+        var reader = new BsonReader(document);
+        reader.ReadStartDocument();
+        Assert.IsTrue(reader.Read());
+        ReaderAssert.Throws<InvalidDataException>(ref reader, read);
+
+        AssertLittleAllocated(what, before);
+    }
+
+    private static void AssertLittleAllocated(string what, long before)
+    {
+        var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        // The bound is far above what the read path needs and far below the declared length, so
+        // it does not turn on the exact cost of an exception.
+        Assert.IsTrue(
+            allocated < 1_000_000,
+            $"{what} allocated {allocated:N0} bytes for a document of a few dozen bytes.");
+    }
+
     /// <summary>
     /// Two documents in one input. A caller slices at
     /// <see cref="BsonReader.BytesConsumed"/> to reach the second one. Thus that value must be

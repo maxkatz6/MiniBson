@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Text;
@@ -112,11 +112,13 @@ internal sealed class BsonWriter
         if (_depth == _frames.Length)
             Array.Resize(ref _frames, _frames.Length * 2);
 
+        var savedArrayIndex = _arrayIndex;
+
         _frames[_depth++] = new DocumentFrame
         {
             StartPosition = _position,
             ExpectedLength = documentLength,
-            SavedArrayIndex = _arrayIndex,
+            SavedArrayIndex = savedArrayIndex,
         };
 
         // An array numbers its elements from zero. WriteEndDocument puts back the counter of the
@@ -124,7 +126,16 @@ internal sealed class BsonWriter
         if (isArray)
             _arrayIndex = 0;
 
-        WriteInt32Raw(documentLength);
+        try
+        {
+            WriteInt32Raw(documentLength);
+        }
+        catch
+        {
+            _depth--;
+            _arrayIndex = savedArrayIndex;
+            throw;
+        }
     }
 
     /// <summary>
@@ -545,13 +556,11 @@ internal sealed class BsonWriter
         if (lengthPrefixed)
             WriteInt32Raw(byteCount + 1); // the declared length counts the terminator
 
-        if (byteCount <= _memory.Length - _buffered)
+        if (TryStageDirect(byteCount, out var destination))
         {
             // The destination has room. Thus the value goes there and needs no second buffer. A
             // name and a short string almost always take this path.
-            var direct = Encoding.UTF8.GetBytes(value, _memory.Span.Slice(_buffered));
-            _buffered += direct;
-            _position += direct;
+            Encoding.UTF8.GetBytes(value, destination);
         }
         else
         {
@@ -573,7 +582,7 @@ internal sealed class BsonWriter
         WriteByteRaw(0);
     }
 
-    // The output primitives. Each byte that this writer produces goes through one of the three
+    // The output primitives. Each byte that this writer produces goes through one of the four
     // methods below, and reaches the destination through Acquire and Flush.
 
     /// <summary>
@@ -603,6 +612,24 @@ internal sealed class BsonWriter
 
         _memory.Span[_buffered++] = value;
         _position++;
+    }
+
+    /// <summary>
+    /// Returns the room for <paramref name="byteCount"/> adjacent bytes that the buffer already
+    /// holds, and does not ask the destination for more. Returns false when it holds fewer.
+    /// </summary>
+    private bool TryStageDirect(int byteCount, out Span<byte> destination)
+    {
+        if (_memory.Length - _buffered < byteCount)
+        {
+            destination = default;
+            return false;
+        }
+
+        destination = _memory.Span.Slice(_buffered, byteCount);
+        _buffered += byteCount;
+        _position += byteCount;
+        return true;
     }
 
     private void WriteInt32Raw(int value) =>
@@ -684,11 +711,11 @@ internal sealed class BsonWriter
     /// </remarks>
     public void Flush()
     {
-        if (_buffered == 0)
-            return;
-
-        _output.Advance(_buffered);
-        _buffered = 0;
+        if (_buffered > 0)
+        {
+            _output.Advance(_buffered);
+            _buffered = 0;
+        }
 
         // The contract of IBufferWriter is that the buffer is invalid after Advance.
         _memory = default;
