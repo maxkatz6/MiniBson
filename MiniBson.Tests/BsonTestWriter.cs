@@ -84,20 +84,4 @@ internal static class BsonWriterTestExtensions
         body(writer);
         writer.WriteEndArray();
     }
-
-    /// <summary>Writes a nested document as an array element.</summary>
-    public static void NestedDocument(this BsonWriter writer, Action<BsonWriter> body)
-    {
-        writer.WriteStartNestedDocument(BsonTestWriter.DocumentLength(body));
-        body(writer);
-        writer.WriteEndDocument();
-    }
-
-    /// <summary>Writes a nested array as an array element.</summary>
-    public static void NestedArray(this BsonWriter writer, Action<BsonWriter> body)
-    {
-        writer.WriteStartNestedArray(BsonTestWriter.DocumentLength(body));
-        body(writer);
-        writer.WriteEndArray();
-    }
 }

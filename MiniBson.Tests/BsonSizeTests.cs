@@ -198,6 +198,8 @@ public sealed class BsonSizeTests
             }));
     }
 
+    // The key bytes alone, which ArrayOverhead adds to the document overhead and the type byte
+    // of each element.
     [TestMethod]
     [DataRow(0, 0)]
     [DataRow(1, 2)]      // "0"
@@ -206,15 +208,16 @@ public sealed class BsonSizeTests
     [DataRow(100, 290)]  // 10*2 + 90*3
     [DataRow(101, 294)]  // + "100"
     [DataRow(1000, 3890)]
-    public void ArrayKeyBytesIsExact(int count, int expected)
+    public void ArrayKeyBytesIsExact(int count, int expectedKeyBytes)
     {
-        Assert.AreEqual(expected, BsonSize.ArrayKeyBytes(count));
+        Assert.AreEqual(
+            BsonSize.DocumentOverhead + count + expectedKeyBytes,
+            BsonSize.ArrayOverhead(count));
     }
 
     [TestMethod]
     public void NegativeCountIsRejected()
     {
-        Assert.Throws<ArgumentOutOfRangeException>(() => BsonSize.ArrayKeyBytes(-1));
         Assert.Throws<ArgumentOutOfRangeException>(() => BsonSize.ArrayOverhead(-1));
     }
 
@@ -222,11 +225,13 @@ public sealed class BsonSizeTests
     [TestMethod]
     public void ArrayKeyBytesHandlesLargeCount()
     {
+        const int count = 20000;
+
         var brute = 0;
-        for (var i = 0; i < 20000; i++)
+        for (var i = 0; i < count; i++)
             brute += i.ToString().Length + 1;
 
-        Assert.AreEqual(brute, BsonSize.ArrayKeyBytes(20000));
+        Assert.AreEqual(BsonSize.DocumentOverhead + count + brute, BsonSize.ArrayOverhead(count));
     }
 
     /// <summary>
@@ -237,10 +242,9 @@ public sealed class BsonSizeTests
     [TestMethod]
     public void CountWhoseKeysOutgrowAnIntIsRejected()
     {
-        Assert.Throws<ArgumentOutOfRangeException>(() => BsonSize.ArrayKeyBytes(int.MaxValue));
         Assert.Throws<ArgumentOutOfRangeException>(() => BsonSize.ArrayOverhead(int.MaxValue));
 
         // Just under the boundary still answers, and answers correctly.
-        Assert.IsTrue(BsonSize.ArrayKeyBytes(190_000_000) > 0);
+        Assert.IsTrue(BsonSize.ArrayOverhead(190_000_000) > 0);
     }
 }

@@ -15,37 +15,6 @@ public sealed class BsonGeneratorSizeTests
     private int WrittenLength(object value) =>
         BsonTestWriter.Raw(writer => _context.Serialize(value, writer)).Length;
 
-    [TestMethod]
-    public void MatchesWrittenLengthForAFlatModel()
-    {
-        var value = new SimpleType { Name = "Ada", Age = 37, IsActive = true };
-        Assert.AreEqual(WrittenLength(value), _context.GetSerializedSize(value));
-    }
-
-    [TestMethod]
-    public void MatchesWrittenLengthForNestedAndArrayModels()
-    {
-        var value = new ComplexType
-        {
-            Id = Guid.NewGuid(),
-            Name = "complex",
-            Score = 1.5,
-            CreatedAt = new DateTime(2024, 3, 1, 0, 0, 0, DateTimeKind.Utc),
-            Items =
-            [
-                new SimpleType { Name = "one", Age = 1, IsActive = true },
-                new SimpleType { Name = "two", Age = 2, IsActive = false },
-            ],
-            Nested = new NestedType
-            {
-                Title = "inner",
-                Inner = new SimpleType { Name = "deep", Age = 3, IsActive = true },
-            },
-        };
-
-        Assert.AreEqual(WrittenLength(value), _context.GetSerializedSize(value));
-    }
-
     /// <summary>
     /// The key of an array element is a decimal index. Thus the length must change at each new
     /// digit count.
@@ -80,16 +49,6 @@ public sealed class BsonGeneratorSizeTests
             NullableDate = new DateTime(2024, 1, 1, 0, 0, 0, DateTimeKind.Utc),
         };
         Assert.AreEqual(WrittenLength(withValues), _context.GetSerializedSize(withValues));
-    }
-
-    [TestMethod]
-    public void MatchesWrittenLengthForSelfReferencingModels()
-    {
-        LinkedNode? head = null;
-        for (var i = 9; i >= 0; i--)
-            head = new LinkedNode { Label = "node" + i, Depth = i, Next = head };
-
-        Assert.AreEqual(WrittenLength(head!), _context.GetSerializedSize(head!));
     }
 
     /// <summary>

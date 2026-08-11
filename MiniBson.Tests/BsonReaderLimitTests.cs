@@ -435,33 +435,4 @@ public sealed class BsonReaderLimitTests
         ReaderAssert.Throws<InvalidDataException>(ref second, (ref BsonReader r) => r.ReadString());
     }
 
-    /// <summary>
-    /// <see cref="BsonReader.CurrentName"/> decodes the name when the caller reads the property.
-    /// Thus a reader that only skips must still give the correct name on request.
-    /// </summary>
-    [TestMethod]
-    public void CurrentNameSpanMatchesCurrentName()
-    {
-        var document = Write(w =>
-        {
-            w.WriteInt32("alpha", 1);
-            w.WriteString("beta", "x");
-        });
-
-        var reader = new BsonReader(document);
-        reader.ReadStartDocument();
-
-        Assert.IsTrue(reader.Read());
-        CollectionAssert.AreEqual("alpha"u8.ToArray(), reader.CurrentNameSpan.ToArray());
-        Assert.AreEqual("alpha", reader.CurrentName);
-        reader.Skip();
-
-        Assert.IsTrue(reader.Read());
-        CollectionAssert.AreEqual("beta"u8.ToArray(), reader.CurrentNameSpan.ToArray());
-        Assert.AreEqual("beta", reader.CurrentName);
-        reader.Skip();
-
-        Assert.IsFalse(reader.Read());
-        reader.ReadEndDocument();
-    }
 }

@@ -42,10 +42,4 @@ internal sealed class EquatableList<T>(IList<T> collection)
 
         return hash;
     }
-
-    public static bool operator ==(EquatableList<T>? left, EquatableList<T>? right) =>
-        ReferenceEquals(left, right) || (left is not null && left.Equals(right));
-
-    public static bool operator !=(EquatableList<T>? left, EquatableList<T>? right) =>
-        !(left == right);
 }

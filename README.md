@@ -13,8 +13,6 @@ MiniBson is a small BSON library for .NET. It has a forward-only reader, a forwa
 - No dependency on `net8.0`, and only `System.Memory` on `netstandard2.0`
 - An assembly NuGet package and a source-only NuGet package
 
-Coming from version 1.x? See [Migrating from 1.x](#migrating-from-1x).
-
 ## Installation
 
 For most applications, use the regular package:
@@ -259,7 +257,7 @@ Every failure that the input causes is an `InvalidDataException`: a truncated do
 | ObjectId | `WriteObjectId` | `ReadObjectId` |
 | Boolean | `WriteBoolean` | `ReadBoolean` |
 | DateTime | `WriteDateTime` | `ReadDateTime` |
-| Null | `WriteNull` | Examine `CurrentType`, or use `ReadValue` |
+| Null | `WriteNull` | Examine `CurrentType` |
 | Regular expression | `WriteRegex` | `ReadRegex` |
 | JavaScript | `WriteJavaScript` | `ReadJavaScript` |
 | Int32 | `WriteInt32` | `ReadInt32` |
@@ -300,39 +298,9 @@ The writer asks the destination for adjacent bytes only for a scalar or the digi
 
 `ArrayBufferWriter<byte>` is the destination for a document that you keep in memory. Construct it with the number from `GetSerializedSize`, and it allocates one time and does not grow. Read the result from `WrittenSpan` or `WrittenMemory`, and call `Clear()` to reuse it. A later write makes a span or memory from an earlier call invalid.
 
-## Migrating from 1.x
-
-Version 2.0 removed `Stream` from the API. The wire format did not change, so documents from 1.x read back unchanged.
-
-| 1.x | 2.0 |
-| --- | --- |
-| `new BsonWriter(stream, leaveOpen)` | `new BsonWriter(bufferWriter)` |
-| `new BsonReader(stream, leaveOpen)` | Read the bytes first, then `new BsonReader(bytes)` |
-| `writer.WriteStartDocument()` | `writer.WriteStartDocument(length)` — compute it with `BsonSize` |
-| `writer.RequiresKnownLength` | Removed. A length is always required. |
-| `writer.Dispose()` | Removed. `WriteEndDocument()` commits; `Flush()` commits a partial document. |
-| `reader.Dispose()` | Removed. The reader owns nothing. |
-| `context.Deserialize(reader, type)` | `context.Deserialize(ref reader, type)` |
-| `reader.ReadBinary()` returning a tuple | `reader.ReadBinary(out var subType)` returning a span, or `ReadBinaryArray(out var subType)` |
-| `reader.ReadBinaryAsMemory()` | `reader.ReadBinaryMemory(out var subType)` |
-| `reader.ReadObjectId()` returning `byte[]` | Returns a `ReadOnlySpan<byte>`. Call `.ToArray()` for the old behavior. |
-| `EndOfStreamException` on truncated input | `InvalidDataException` |
-
-To bridge a `Stream` on the write side, write into an `ArrayBufferWriter<byte>` and copy:
-
-```csharp
-var output = new ArrayBufferWriter<byte>(context.GetSerializedSize(value));
-context.Serialize(value, new BsonWriter(output));
-stream.Write(output.WrittenSpan);
-```
-
-On the read side, read the stream into a `byte[]` first. `BsonReader` needs the full document in memory, so it does not decode a document in parts. With a `PipeReader`, read the four-byte length, wait for that number of bytes, and pass that slice.
-
-`BsonReader` is now a ref struct. Thus code that held one in a field, or used one across an `await`, needs a new shape. Read the bytes with async code, and then deserialize with sync code.
-
 ## How to contribute
 
-See [DEVELOPMENT.md](DEVELOPMENT.md) for the repository structure, the design notes, the tests, the package commands, and the documentation rules.
+See [AGENTS.md](AGENTS.md) for the build commands, the reader and writer invariants, the generator constraints, the testing rules, and the package commands.
 
 ## Acknowledgments
 

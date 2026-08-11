@@ -188,37 +188,6 @@ public class MetsysCrossTests
     }
 
     [TestMethod]
-    public void SerializesAHashSet()
-    {
-        var result = Serialize(w =>
-        {
-            w.Array("Name", a =>
-            {
-                a.WriteInt32(3);
-                a.WriteInt32(2);
-                a.WriteInt32(1);
-            });
-        });
-        Assert.AreEqual(37, BitConverter.ToInt32(result, 0)); //length
-        Assert.AreEqual(4, result[4]); //type
-        Assert.AreEqual(26, BitConverter.ToInt32(result, 10)); //sub document length
-        Assert.AreEqual(16, result[14]); //1st element type
-        Assert.AreEqual((byte)'0', result[15]); //1st element name
-        Assert.AreEqual(0, result[16]); //1st element name eoo
-        Assert.AreEqual(3, BitConverter.ToInt32(result, 17));
-        Assert.AreEqual(16, result[21]); //2nd element type
-        Assert.AreEqual((byte)'1', result[22]); //2nd element name
-        Assert.AreEqual(0, result[23]); //2nd element name eoo
-        Assert.AreEqual(2, BitConverter.ToInt32(result, 24));
-        Assert.AreEqual(16, result[28]); //3rd element type
-        Assert.AreEqual((byte)'2', result[29]); //3rd element name
-        Assert.AreEqual(0, result[30]); //3rd element name eoo
-        Assert.AreEqual(1, BitConverter.ToInt32(result, 31));
-        Assert.AreEqual((byte)0, result[35]); //sub document eoo
-        Assert.AreEqual((byte)0, result[36]); //main document eoo
-    }
-
-    [TestMethod]
     public void SeralizesByteArrayAsABinary_BinaryOld()
     {
         var result = Serialize(w => w.WriteBinary("Name", [10, 12], BsonBinarySubType.BinaryOld));

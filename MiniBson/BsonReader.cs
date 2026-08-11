@@ -1,7 +1,6 @@
 using System;
 using System.Buffers;
 using System.Buffers.Binary;
-using System.Collections.Generic;
 using System.IO;
 using System.Text;
 
@@ -52,8 +51,8 @@ internal ref struct BsonReader
     /// </summary>
     private long _limit;
 
-    // The open documents, packed as (endPosition << 1) | isArray. Depth 1 is a field, so a flat
-    // document allocates nothing. Only a nested document uses the array.
+    // The end position of each open document. Depth 1 is a field, so a flat document allocates
+    // nothing. Only a nested document uses the array.
     private long _frame0;
     private long[]? _frames;
     private int _depth;
@@ -131,17 +130,6 @@ internal ref struct BsonReader
     public string CurrentName => _name ??= DecodeString(_nameSpan);
 
     /// <summary>
-    /// The name of the current element as UTF-8 bytes. It allocates no memory, except for a name
-    /// that lies across two segments.
-    /// </summary>
-    public readonly ReadOnlySpan<byte> CurrentNameSpan => _nameSpan;
-
-    /// <summary>
-    /// True when the reader is in an array.
-    /// </summary>
-    public readonly bool IsInArray => _depth > 0 && (PeekFrame() & 1) != 0;
-
-    /// <summary>
     /// The number of bytes that the reader consumed. Slice your input at this value to read the
     /// document after this one.
     /// </summary>
@@ -150,7 +138,7 @@ internal ref struct BsonReader
     /// <summary>
     /// Reads the start of a document. Call this method before you read the elements.
     /// </summary>
-    public void ReadStartDocument() => PushDocument(isArray: false);
+    public void ReadStartDocument() => PushDocument();
 
     /// <summary>
     /// Reads the start of an embedded document.
@@ -158,7 +146,7 @@ internal ref struct BsonReader
     public void ReadStartNestedDocument()
     {
         EnsureType(BsonType.Document);
-        PushDocument(isArray: false);
+        PushDocument();
     }
 
     /// <summary>
@@ -167,7 +155,7 @@ internal ref struct BsonReader
     public void ReadStartArray()
     {
         EnsureType(BsonType.Array);
-        PushDocument(isArray: true);
+        PushDocument();
     }
 
     /// <summary>
@@ -205,7 +193,7 @@ internal ref struct BsonReader
     /// <summary>
     /// Reads the length prefix of a document and opens a frame for it.
     /// </summary>
-    private void PushDocument(bool isArray)
+    private void PushDocument()
     {
         var start = BytesConsumed;
         var length = ReadLengthCore(BsonSize.DocumentOverhead, "A document");
@@ -230,7 +218,7 @@ internal ref struct BsonReader
         }
 
         _limit = endPosition;
-        PushFrame(endPosition, isArray);
+        PushFrame(endPosition);
     }
 
     /// <summary>
@@ -339,18 +327,6 @@ internal ref struct BsonReader
     {
         EnsureType(BsonType.ObjectId);
         return TakeContiguous(BsonSize.ObjectId);
-    }
-
-    /// <summary>
-    /// Reads a BSON ObjectId into the span that you supply.
-    /// </summary>
-    public void ReadObjectId(Span<byte> destination)
-    {
-        EnsureType(BsonType.ObjectId);
-        if (destination.Length < BsonSize.ObjectId)
-            throw new ArgumentException($"Destination must be at least {BsonSize.ObjectId} bytes.", nameof(destination));
-
-        ReadIntoCore(destination.Slice(0, BsonSize.ObjectId));
     }
 
     /// <summary>
@@ -557,67 +533,14 @@ internal ref struct BsonReader
         }
     }
 
-    /// <summary>
-    /// Reads any value and returns it as an object.
-    /// </summary>
-    public object? ReadValue()
-    {
-        return CurrentType switch
-        {
-            BsonType.Double => ReadDouble(),
-            BsonType.String => ReadString(),
-            BsonType.Document => ReadDocumentAsDictionary(),
-            BsonType.Array => ReadArrayAsList(),
-            BsonType.Binary => ReadBinaryArray(out _),
-            BsonType.Undefined => null,
-            BsonType.ObjectId => ReadObjectId().ToArray(),
-            BsonType.Boolean => ReadBoolean(),
-            BsonType.DateTime => ReadDateTime(),
-            BsonType.Null => null,
-            BsonType.Regex => ReadRegex(),
-            BsonType.JavaScript => ReadJavaScript(),
-            BsonType.Symbol => ReadString(),
-            BsonType.Int32 => ReadInt32(),
-            BsonType.Timestamp => ReadTimestamp(),
-            BsonType.Int64 => ReadInt64(),
-            _ => throw new InvalidDataException($"Unsupported BSON type: {CurrentType}")
-        };
-    }
-
-    private Dictionary<string, object?> ReadDocumentAsDictionary()
-    {
-        var dict = new Dictionary<string, object?>();
-        ReadStartNestedDocument();
-        while (Read())
-        {
-            dict[CurrentName] = ReadValue();
-        }
-        ReadEndDocument();
-        return dict;
-    }
-
-    private List<object?> ReadArrayAsList()
-    {
-        var list = new List<object?>();
-        ReadStartArray();
-        while (Read())
-        {
-            list.Add(ReadValue());
-        }
-        ReadEndDocument();
-        return list;
-    }
-
-    // The open-document frames. Only these four members touch the packing, so a different
+    // The open-document frames. Only these two members touch the storage, so a different
     // container for them is a local change.
 
-    private void PushFrame(long endPosition, bool isArray)
+    private void PushFrame(long endPosition)
     {
-        var packed = (endPosition << 1) | (isArray ? 1L : 0L);
-
         if (_depth == 0)
         {
-            _frame0 = packed;
+            _frame0 = endPosition;
         }
         else
         {
@@ -628,15 +551,13 @@ internal ref struct BsonReader
             else if (index >= _frames.Length)
                 Array.Resize(ref _frames, _frames.Length * 2);
 
-            _frames[index] = packed;
+            _frames[index] = endPosition;
         }
 
         _depth++;
     }
 
-    private readonly long PeekFrame() => _depth == 1 ? _frame0 : _frames![_depth - 2];
-
-    private readonly long PeekEnd() => PeekFrame() >> 1;
+    private readonly long PeekEnd() => _depth == 1 ? _frame0 : _frames![_depth - 2];
 
     private void EnsureType(BsonType expected)
     {

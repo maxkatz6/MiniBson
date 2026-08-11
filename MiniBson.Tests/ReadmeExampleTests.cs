@@ -118,49 +118,6 @@ public sealed class ReadmeExampleTests
         CollectionAssert.AreEqual(new[] { "Ada", "37", "compiler", "math" }, seen);
     }
 
-    /// <summary>The stream bridge from the "Migrating from 1.x" section.</summary>
-    [TestMethod]
-    public void StreamBridgeExample()
-    {
-        var context = new ReadmeBsonContext();
-        var value = new Person { Name = "Grace", Age = 45, Tags = ["navy"] };
-
-        using var stream = new MemoryStream();
-
-        var output = new ArrayBufferWriter<byte>(context.GetSerializedSize(value));
-        context.Serialize(value, new BsonWriter(output));
-        stream.Write(output.WrittenSpan);
-
-        var reader = new BsonReader(stream.ToArray());
-        var copy = (Person?)context.Deserialize(ref reader, typeof(Person));
-
-        Assert.IsNotNull(copy);
-        Assert.AreEqual("Grace", copy.Name);
-    }
-
-    /// <summary>The BytesConsumed slicing described under "Read a document".</summary>
-    [TestMethod]
-    public void BytesConsumedSlicesToTheNextDocument()
-    {
-        var one = BsonTestWriter.Serialize(w => w.WriteInt32("n", 1));
-        var two = BsonTestWriter.Serialize(w => w.WriteInt32("n", 2));
-
-        var both = new byte[one.Length + two.Length];
-        one.CopyTo(both, 0);
-        two.CopyTo(both, one.Length);
-
-        var reader = new BsonReader(both);
-        reader.ReadStartDocument();
-        Assert.IsTrue(reader.Read());
-        Assert.AreEqual(1, reader.ReadInt32());
-        reader.ReadEndDocument();
-
-        var next = new BsonReader(both.AsMemory((int)reader.BytesConsumed));
-        next.ReadStartDocument();
-        Assert.IsTrue(next.Read());
-        Assert.AreEqual(2, next.ReadInt32());
-        next.ReadEndDocument();
-    }
 }
 
 [BsonSerializable(typeof(ReadmeExampleTests.Person))]

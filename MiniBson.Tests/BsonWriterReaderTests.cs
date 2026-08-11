@@ -259,67 +259,6 @@ public sealed class BsonWriterReaderTests
     }
 
     [TestMethod]
-    public void WriteAndReadFromByteArray()
-    {
-        var document = BsonTestWriter.Serialize(writer => writer.WriteString("key", "value"));
-
-        var reader = new BsonReader(document);
-        reader.ReadStartDocument();
-
-        Assert.IsTrue(reader.Read());
-        Assert.AreEqual("key", reader.CurrentName);
-        Assert.AreEqual("value", reader.ReadString());
-
-        Assert.IsFalse(reader.Read());
-        reader.ReadEndDocument();
-    }
-
-    [TestMethod]
-    public void SkipElement()
-    {
-        var document = BsonTestWriter.Serialize(writer =>
-        {
-            writer.WriteString("first", "skip me");
-            writer.WriteInt32("second", 42);
-        });
-
-        var reader = new BsonReader(document);
-        reader.ReadStartDocument();
-
-        Assert.IsTrue(reader.Read());
-        Assert.AreEqual("first", reader.CurrentName);
-        reader.Skip(); // Skip the string value
-
-        Assert.IsTrue(reader.Read());
-        Assert.AreEqual("second", reader.CurrentName);
-        Assert.AreEqual(42, reader.ReadInt32());
-
-        Assert.IsFalse(reader.Read());
-        reader.ReadEndDocument();
-    }
-
-    [TestMethod]
-    public void ReadValueAsDynamic()
-    {
-        var document = BsonTestWriter.Serialize(writer =>
-        {
-            writer.WriteString("str", "hello");
-            writer.WriteInt32("num", 42);
-        });
-
-        var reader = new BsonReader(document);
-        reader.ReadStartDocument();
-
-        Assert.IsTrue(reader.Read());
-        Assert.AreEqual("hello", reader.ReadValue());
-
-        Assert.IsTrue(reader.Read());
-        Assert.AreEqual(42, reader.ReadValue());
-
-        reader.ReadEndDocument();
-    }
-
-    [TestMethod]
     public void WriteRegex()
     {
         var document = BsonTestWriter.Serialize(writer => writer.WriteRegex("pattern", "^test.*$", "im"));

@@ -503,37 +503,74 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
             $"{GetSafeMethodName(type)}_{property.Name}",
             property.Location);
 
-    private static void GenerateWriteProperty(StringBuilder sb, string name, TypeRefInfo type, string accessor, EmitScope scope)
+    /// <summary>
+    /// Writes the null test that goes around a value, and then the value itself.
+    /// </summary>
+    /// <remarks>
+    /// The generated code tests each reference, with an annotation and without one. A model that
+    /// the compiler built without nullable reference types can still hold a null. BSON has no
+    /// encoding of a null as a string or as binary data. Thus a measurement would give a document
+    /// that the writer cannot then write. A <c>Nullable&lt;T&gt;</c> has its own test. The four
+    /// emitters that call this method differ only in what they write for a null and for a value,
+    /// so the shape that they share lives here one time.
+    /// </remarks>
+    /// <param name="nullStatement">
+    /// The statement for a null, without its indent. When it is <see langword="null"/> there is
+    /// no null branch, and the reference test is inverted so that no empty block appears.
+    /// </param>
+    /// <param name="emitValue">Writes the value. It receives the accessor and the indent.</param>
+    private static void EmitNullGuarded(
+        StringBuilder sb,
+        TypeRefInfo type,
+        string accessor,
+        string indent,
+        string? nullStatement,
+        Action<string, string> emitValue)
     {
-        var isNullable = type.IsNullable;
-        var underlyingType = type.NullableUnderlyingType ?? type;
+        var inner = indent + "    ";
 
-        // The generated code tests each reference, with an annotation and without one. A model
-        // that the compiler built without nullable reference types can still hold a null. BSON
-        // has no encoding of a null as a string or as binary data. Thus a measurement would give
-        // a document that the writer cannot then write.
         if (!type.IsValueType)
         {
-            sb.AppendLine($"        if ({accessor} is null)");
-            sb.AppendLine($"            writer.WriteNull(\"{name}\");");
-            sb.AppendLine("        else");
-            sb.AppendLine("        {");
-            GenerateWriteValue(sb, name, underlyingType, accessor, "            ", scope);
-            sb.AppendLine("        }");
+            if (nullStatement is null)
+            {
+                sb.AppendLine($"{indent}if ({accessor} is not null)");
+            }
+            else
+            {
+                sb.AppendLine($"{indent}if ({accessor} is null)");
+                sb.AppendLine($"{indent}    {nullStatement}");
+                sb.AppendLine($"{indent}else");
+            }
+
+            sb.AppendLine($"{indent}{{");
+            emitValue(accessor, inner);
+            sb.AppendLine($"{indent}}}");
         }
-        else if (isNullable && type.IsValueType)
+        else if (type.IsNullable)
         {
-            sb.AppendLine($"        if ({accessor}.HasValue)");
-            sb.AppendLine("        {");
-            GenerateWriteValue(sb, name, underlyingType, $"{accessor}.Value", "            ", scope);
-            sb.AppendLine("        }");
-            sb.AppendLine("        else");
-            sb.AppendLine($"            writer.WriteNull(\"{name}\");");
+            sb.AppendLine($"{indent}if ({accessor}.HasValue)");
+            sb.AppendLine($"{indent}{{");
+            emitValue($"{accessor}.Value", inner);
+            sb.AppendLine($"{indent}}}");
+
+            if (nullStatement is not null)
+            {
+                sb.AppendLine($"{indent}else");
+                sb.AppendLine($"{indent}    {nullStatement}");
+            }
         }
         else
         {
-            GenerateWriteValue(sb, name, underlyingType, accessor, "        ", scope);
+            emitValue(accessor, indent);
         }
+    }
+
+    private static void GenerateWriteProperty(StringBuilder sb, string name, TypeRefInfo type, string accessor, EmitScope scope)
+    {
+        var underlyingType = type.NullableUnderlyingType ?? type;
+
+        EmitNullGuarded(sb, type, accessor, "        ", $"writer.WriteNull(\"{name}\");",
+            (value, indent) => GenerateWriteValue(sb, name, underlyingType, value, indent, scope));
     }
 
     private static void GenerateWriteValue(StringBuilder sb, string name, TypeRefInfo type, string accessor, string indent, EmitScope scope)
@@ -579,32 +616,10 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
 
     private static void GenerateWriteArrayElement(StringBuilder sb, TypeRefInfo type, string accessor, string indent, EmitScope scope)
     {
-        var isNullable = type.IsNullable;
         var underlyingType = type.NullableUnderlyingType ?? type;
 
-        // With an annotation and without one. See GenerateWriteProperty.
-        if (!type.IsValueType)
-        {
-            sb.AppendLine($"{indent}if ({accessor} is null)");
-            sb.AppendLine($"{indent}    writer.WriteNull();");
-            sb.AppendLine($"{indent}else");
-            sb.AppendLine($"{indent}{{");
-            GenerateWriteArrayElementValue(sb, underlyingType, accessor, indent + "    ", scope);
-            sb.AppendLine($"{indent}}}");
-        }
-        else if (isNullable && type.IsValueType)
-        {
-            sb.AppendLine($"{indent}if ({accessor}.HasValue)");
-            sb.AppendLine($"{indent}{{");
-            GenerateWriteArrayElementValue(sb, underlyingType, $"{accessor}.Value", indent + "    ", scope);
-            sb.AppendLine($"{indent}}}");
-            sb.AppendLine($"{indent}else");
-            sb.AppendLine($"{indent}    writer.WriteNull();");
-        }
-        else
-        {
-            GenerateWriteArrayElementValue(sb, underlyingType, accessor, indent, scope);
-        }
+        EmitNullGuarded(sb, type, accessor, indent, "writer.WriteNull();",
+            (value, valueIndent) => GenerateWriteArrayElementValue(sb, underlyingType, value, valueIndent, scope));
     }
 
     private static void GenerateWriteArrayElementValue(StringBuilder sb, TypeRefInfo type, string accessor, string indent, EmitScope scope)
@@ -690,35 +705,11 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
 
     private static void GenerateMeasureProperty(StringBuilder sb, StringBuilder helpers, string name, TypeRefInfo type, string accessor, string indent, EmitScope scope)
     {
-        var isNullable = type.IsNullable;
         var underlyingType = type.NullableUnderlyingType ?? type;
 
         // WriteNull writes the element header and no value.
-        var nullSize = ElementOverhead(name);
-
-        // With an annotation and without one. See GenerateWriteProperty.
-        if (!type.IsValueType)
-        {
-            sb.AppendLine($"{indent}if ({accessor} is null)");
-            sb.AppendLine($"{indent}    __size += {nullSize};");
-            sb.AppendLine($"{indent}else");
-            sb.AppendLine($"{indent}{{");
-            GenerateMeasureValue(sb, helpers, name, underlyingType, accessor, indent + "    ", scope);
-            sb.AppendLine($"{indent}}}");
-        }
-        else if (isNullable && type.IsValueType)
-        {
-            sb.AppendLine($"{indent}if ({accessor}.HasValue)");
-            sb.AppendLine($"{indent}{{");
-            GenerateMeasureValue(sb, helpers, name, underlyingType, $"{accessor}.Value", indent + "    ", scope);
-            sb.AppendLine($"{indent}}}");
-            sb.AppendLine($"{indent}else");
-            sb.AppendLine($"{indent}    __size += {nullSize};");
-        }
-        else
-        {
-            GenerateMeasureValue(sb, helpers, name, underlyingType, accessor, indent, scope);
-        }
+        EmitNullGuarded(sb, type, accessor, indent, $"__size += {ElementOverhead(name)};",
+            (value, valueIndent) => GenerateMeasureValue(sb, helpers, name, underlyingType, value, valueIndent, scope));
     }
 
     private static void GenerateMeasureValue(StringBuilder sb, StringBuilder helpers, string name, TypeRefInfo type, string accessor, string indent, EmitScope scope)
@@ -792,29 +783,11 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
 
     private static void GenerateMeasureArrayElement(StringBuilder sb, TypeRefInfo type, string accessor, string indent, EmitScope scope)
     {
-        var isNullable = type.IsNullable;
         var underlyingType = type.NullableUnderlyingType ?? type;
 
-        // ArrayOverhead already counts the header of a null element, so there is no else block.
-        // With an annotation and without one. See GenerateWriteProperty.
-        if (!type.IsValueType)
-        {
-            sb.AppendLine($"{indent}if ({accessor} is not null)");
-            sb.AppendLine($"{indent}{{");
-            GenerateMeasureArrayElementValue(sb, underlyingType, accessor, indent + "    ", scope);
-            sb.AppendLine($"{indent}}}");
-        }
-        else if (isNullable && type.IsValueType)
-        {
-            sb.AppendLine($"{indent}if ({accessor}.HasValue)");
-            sb.AppendLine($"{indent}{{");
-            GenerateMeasureArrayElementValue(sb, underlyingType, $"{accessor}.Value", indent + "    ", scope);
-            sb.AppendLine($"{indent}}}");
-        }
-        else
-        {
-            GenerateMeasureArrayElementValue(sb, underlyingType, accessor, indent, scope);
-        }
+        // ArrayOverhead already counts the header of a null element, so there is no null branch.
+        EmitNullGuarded(sb, type, accessor, indent, nullStatement: null,
+            (value, valueIndent) => GenerateMeasureArrayElementValue(sb, underlyingType, value, valueIndent, scope));
     }
 
     private static void GenerateMeasureArrayElementValue(StringBuilder sb, TypeRefInfo type, string accessor, string indent, EmitScope scope)
@@ -1256,7 +1229,6 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
                 symbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
                 symbol.Name,
                 false,
-                symbol.IsValueType,
                 EquatableList<PropertyInfo>.Empty);
 
         var properties = GetAllProperties(symbol)
@@ -1271,7 +1243,6 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
             symbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
             symbol.Name,
             symbol.IsRecord && symbol.TypeKind == TypeKind.Class,
-            symbol.IsValueType,
             new EquatableList<PropertyInfo>(properties));
     }
 
@@ -1320,7 +1291,6 @@ public sealed class BsonSerializerGenerator : IIncrementalGenerator
 
         return new TypeRefInfo(
             symbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
-            symbol.Name,
             symbol.SpecialType,
             symbol.IsValueType,
             isNullable,

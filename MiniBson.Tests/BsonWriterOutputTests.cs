@@ -288,21 +288,6 @@ public sealed class BsonWriterOutputTests
         Assert.AreEqual(4 + BsonSize.Element("n") + BsonSize.Int32, output.WrittenCount);
     }
 
-    [TestMethod]
-    public void BytesWrittenCountsBufferedAndCommittedBytes()
-    {
-        var writer = new BsonWriter(new ArrayBufferWriter<byte>());
-        Assert.AreEqual(0L, writer.BytesWritten);
-
-        var length = BsonSize.DocumentOverhead + BsonSize.Element("n") + BsonSize.Int32;
-        writer.WriteStartDocument(length);
-        Assert.AreEqual(4L, writer.BytesWritten);
-
-        writer.WriteInt32("n", 1);
-        writer.WriteEndDocument();
-        Assert.AreEqual((long)length, writer.BytesWritten);
-    }
-
     /// <summary>
     /// A destination that breaks the contract must give a clear message. It must not fail at some
     /// other place inside the writer.
@@ -326,9 +311,7 @@ public sealed class BsonWriterOutputTests
         Assert.ThrowsExactly<InvalidOperationException>(
             () => writer.WriteStartDocument(BsonSize.DocumentOverhead));
 
-        // The length prefix never reached the buffer.
-        Assert.AreEqual(0L, writer.BytesWritten);
-
+        // The failed open left no frame behind.
         var ex = Assert.ThrowsExactly<InvalidOperationException>(() => writer.WriteEndDocument());
         StringAssert.Contains(ex.Message, "no open document");
     }

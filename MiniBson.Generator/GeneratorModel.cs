@@ -36,7 +36,6 @@ internal sealed record TypeInfo(
     string FullyQualifiedName,
     string Name,
     bool IsRecord,
-    bool IsValueType,
     EquatableList<PropertyInfo> Properties);
 
 // IsSettable is true when an object initializer can set the property, that is when the property
@@ -49,7 +48,6 @@ internal sealed record PropertyInfo(
 
 internal sealed record TypeRefInfo(
     string FullyQualifiedName,
-    string Name,
     SpecialType SpecialType,
     bool IsValueType,
     bool IsNullable,

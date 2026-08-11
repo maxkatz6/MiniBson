@@ -113,23 +113,11 @@ internal static class BsonSize
     /// null terminators. These keys are "0" through "<paramref name="count"/> - 1".
     /// </summary>
     /// <remarks>
-    /// This method computes one digit group at a time. Thus the cost does not increase with
-    /// <paramref name="count"/>.
+    /// This method computes one digit group at a time, so the cost does not increase with
+    /// <paramref name="count"/>. The total uses 64 bits, because an array with keys of ten
+    /// digits has more key bytes than an int can hold, and a value that wrapped would give an
+    /// incorrect length.
     /// </remarks>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <paramref name="count"/> is negative, or its keys are longer than a BSON length prefix
-    /// can express.
-    /// </exception>
-    public static int ArrayKeyBytes(int count)
-    {
-        RequireNonNegative(count);
-        return Checked(ArrayKeyBytesCore(count), count);
-    }
-
-    /// <summary>
-    /// This total uses 64 bits. An array with keys of ten digits has more key bytes than an int
-    /// can hold. A value that wrapped would give an incorrect length.
-    /// </summary>
     private static long ArrayKeyBytesCore(int count)
     {
         if (count <= 0)

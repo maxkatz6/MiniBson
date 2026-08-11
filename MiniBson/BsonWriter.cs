@@ -50,9 +50,6 @@ internal sealed class BsonWriter(IBufferWriter<byte> output)
         public int SavedArrayIndex;
     }
 
-    /// <summary>The number of bytes this writer produced, buffered and committed.</summary>
-    public long BytesWritten => _position;
-
     /// <summary>
     /// Writes the start of a BSON document.
     /// </summary>
